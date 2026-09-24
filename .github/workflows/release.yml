@@ -1,0 +1,53 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write      # create the release and upload assets
+  id-token: write      # sign the provenance attestation
+  attestations: write  # store it
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # Release binaries carry the standard library they were built with;
+      # go-version-file would pin the unpatched release named in go.mod.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      # A tag is published the moment it is pushed; the tests have to pass
+      # here, not only in the ci workflow running alongside.
+      - run: go test -race ./...
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Writes the cask to cajbecu/homebrew-tap. GITHUB_TOKEN cannot:
+          # it only reaches this repository. Unset, the cask is skipped.
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      # A signed statement that these files came from this workflow at this
+      # commit. Users check it with: gh attestation verify <file> -R cajbecu/mcpick
+      # GitHub only stores attestations for public repositories (or on
+      # Enterprise plans); on a private one the step fails after the release is
+      # already published. It switches itself on when the repository goes public.
+      - if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.deb
+            dist/*.rpm
+            dist/*.apk
+            dist/checksums.txt

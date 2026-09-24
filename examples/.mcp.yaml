@@ -1,0 +1,51 @@
+# An example catalog. Copy it to the root of a workspace as .mcp.yaml.
+#
+# The shape is Claude's mcpServers, in YAML so it can carry comments. mcpick
+# converts it to whatever dialect the agent you launch expects — TOML for Codex
+# and Grok, serverUrl for Antigravity, a command array for opencode, and so on.
+#
+# Placeholders are expanded only in the config handed to the agent; this file
+# keeps them.
+#
+#   {UUID}            the --uid value (the hostname by default)
+#   ${VAR}            the environment variable, empty when unset
+#   ${VAR:-default}   the environment variable, or default
+#   ${VAR:?why}       refuse to launch when it is missing
+#   $${VAR}           a literal ${VAR}
+#
+# Keep credentials out of this file: it usually ends up in git.
+
+servers:
+  # A remote server whose token must be present. ${VAR:?} turns a forgotten
+  # export into a clear error instead of a confusing 401 twenty seconds later.
+  ahrefs:
+    type: http
+    url: https://api.ahrefs.com/mcp/mcp
+    headers:
+      Authorization: "Bearer ${AHREFS_TOKEN:?export AHREFS_TOKEN first}"
+
+  # A local process. Everything after command goes in args.
+  filesystem:
+    type: stdio
+    command: npx
+    args: ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/src"]
+
+  # Per-session routing: each box gets its own upstream session.
+  neo:
+    type: http
+    url: http://127.0.0.1:9010/mcp?session={UUID}
+
+  # Optional configuration with a fallback.
+  playwright:
+    type: http
+    url: "${PLAYWRIGHT_MCP_URL:-http://playwright-mcp:8931/mcp}"
+
+# Named selections. They live here so they travel with the repository:
+#
+#   mcpick --profile review run claude
+#
+# `s` in the picker saves the current selection as a profile.
+profiles:
+  review: [ahrefs, filesystem]
+  browser: [playwright, neo]
+  minimal: [filesystem]

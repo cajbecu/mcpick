@@ -1,0 +1,57 @@
+#compdef mcpick
+# zsh completion for mcpick
+# install: cp completions/_mcpick ~/.local/share/zsh/site-functions/_mcpick
+
+_mcpick_servers() {
+    local -a names
+    names=(${(f)"$(mcpick list 2>/dev/null | awk '{print $1}')"})
+    _describe 'server' names
+}
+
+_mcpick() {
+    local -a commands targets
+    commands=(
+        'run:pick, render a config and launch a command'
+        'list:print the merged catalog'
+        'doctor:connect to the selected servers and report'
+        'measure:refresh the context-cost estimates'
+        'export:print the selection in a tool dialect'
+        'serve:run as one MCP server fronting the selection'
+        'import:seed the catalog from ~/.claude.json'
+        'profile:list, save or delete profiles'
+        'login:run the OAuth flow for a remote server'
+        'logout:forget a stored token'
+        'targets:list the agents mcpick can launch'
+        'restore:undo a project file left behind by a crash'
+    )
+    targets=(claude codex copilot pi muse opencode gemini antigravity grok devin)
+
+    _arguments -C \
+        '--uid[session id]:uid:' \
+        '--file[catalog file]:file:_files' \
+        '--target[agent dialect]:target:(${targets})' \
+        '--profile[named profile from the catalog]:profile:' \
+        '--select[exact server list]:servers:_mcpick_servers' \
+        '--addr[serve over HTTP]:addr:' \
+        '--home[where mcpick keeps its files]:directory:_files -/' \
+        '--timeout[per-server connect timeout]:duration:' \
+        '--redact[rewrite secrets as ${VAR} on import]' \
+        '--json[machine-readable output]' \
+        '(-y --last)'{-y,--last}'[reuse the saved selection]' \
+        '--all[select everything]' \
+        '--none[select nothing]' \
+        '(-h --help)'{-h,--help}'[show help]' \
+        '--version[print version]' \
+        '1: :->command' \
+        '*:: :->rest'
+
+    case $state in
+        command) _describe 'command' commands ;;
+        rest)
+            # After `run`, complete the agent command rather than mcpick flags.
+            [[ $words[1] == run ]] && _command_names -e
+            ;;
+    esac
+}
+
+_mcpick "$@"

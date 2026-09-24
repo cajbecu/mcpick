@@ -1,0 +1,12 @@
+dist/
+result
+result-*
+
+# mcpick's own runtime artefacts, in case anyone runs it from this checkout
+.scratchpad/
+*.mcpick-bak-*
+*.mcpick-lock
+
+# a stray binary from `go build` in the repo root
+/mcpick
+/mcpick.exe

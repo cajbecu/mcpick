@@ -1,0 +1,52 @@
+name: Support another agent
+description: Ask for a new target, or report that an existing one drifted
+labels: [target]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A target is small: it says where the agent keeps its MCP config, what
+        dialect that config is in, and how to point the agent at a different one
+        for a single run. Answer these four and the adapter almost writes itself.
+
+  - type: input
+    id: tool
+    attributes:
+      label: Agent and version
+    validations:
+      required: true
+
+  - type: input
+    id: path
+    attributes:
+      label: Where does it read MCP servers from?
+      description: Global and project paths, e.g. `~/.foo/config.toml` and `.foo/config.toml`
+    validations:
+      required: true
+
+  - type: textarea
+    id: shape
+    attributes:
+      label: What does one server entry look like?
+      description: A remote one and a local one, if they differ.
+      render: json
+    validations:
+      required: true
+
+  - type: dropdown
+    id: override
+    attributes:
+      label: How can a single run be given a different config?
+      options:
+        - A command-line flag
+        - An environment variable pointing at the config directory
+        - Neither; only the file on disk
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: override_detail
+    attributes:
+      label: The flag or variable, if there is one
+      description: e.g. `--mcp-config`, `CODEX_HOME`

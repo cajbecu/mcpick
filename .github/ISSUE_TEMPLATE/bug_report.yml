@@ -1,0 +1,55 @@
+name: Bug report
+description: Something mcpick did wrong
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: mcpick version
+      description: Output of `mcpick --version`
+    validations:
+      required: true
+
+  - type: dropdown
+    id: target
+    attributes:
+      label: Which agent were you launching?
+      options:
+        - claude
+        - codex
+        - copilot
+        - pi
+        - muse
+        - opencode
+        - gemini
+        - antigravity
+        - grok
+        - devin
+        - other / none (mcpick list, doctor, serve)
+    validations:
+      required: true
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: |
+        The command you ran and what came back. `mcpick list` and
+        `mcpick doctor` are usually the two most useful things to paste.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+
+  - type: textarea
+    id: catalog
+    attributes:
+      label: Catalog (optional)
+      description: Your .mcp.yaml with the secrets removed.
+      render: yaml

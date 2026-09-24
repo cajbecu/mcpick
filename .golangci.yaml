@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - bodyclose
+    - noctx
+
+  exclusions:
+    # std-error-handling exempts the calls whose error has nowhere useful to
+    # go: deferred Close, os.Remove of temp files, fmt.Fprint to stderr. The
+    # writes whose failure matters are checked explicitly.
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      # Tests drive local fakes and short-lived children; a context there
+      # only adds noise.
+      - path: _test\.go
+        linters: [errcheck, bodyclose, noctx]
+
+formatters:
+  enable:
+    - gofmt

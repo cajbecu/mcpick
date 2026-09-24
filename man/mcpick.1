@@ -1,0 +1,254 @@
+.TH MCPICK 1 "2026" "mcpick" "User Commands"
+.SH NAME
+mcpick \- choose which MCP servers a session loads, at the moment you launch it
+.SH SYNOPSIS
+.B mcpick
+.RI [ options ]
+.B run
+.I command
+.RI [ args ...]
+.br
+.B mcpick
+.RI [ options ]
+.BR list | doctor | measure | export | serve | import | profile
+.br
+.B mcpick targets
+.SH DESCRIPTION
+Coding agents connect to every MCP server they can find and spend context on the
+tool definitions whether the session needs them or not.
+.B mcpick
+puts a checkbox list in front of that: it merges the servers it can see, shows
+what each one costs in context, remembers what you picked, and launches the
+agent with only the checked ones.
+.PP
+Ten agents are supported. Which mechanism is used depends on what the agent
+offers: a command-line flag where one exists, an overlay of the agent's config
+directory where a directory variable exists, and a rewrite-and-restore of the
+project file otherwise. Run
+.B mcpick targets
+to see what applies to each.
+.SH COMMANDS
+.TP
+.B run \fIcommand\fR [\fIargs\fR...]
+Resolve a selection, render a config in the target's dialect and launch the
+command. Everything after
+.B run
+is passed through untouched.
+.TP
+.B list
+Print the merged catalog. With
+.BR \-\-json ,
+print it as JSON.
+.TP
+.B doctor
+Connect to each selected server and report tool count, context cost, latency and
+the reason for any failure. Exits non-zero if any server is unreachable.
+.TP
+.B measure
+Connect to every server in the catalog and cache its context cost, so the picker
+can show the numbers without connecting.
+.TP
+.B export
+Print the selection in a target's dialect on standard output.
+.TP
+.B serve
+Run mcpick itself as one MCP server fronting the selection, over stdio or, with
+.BR \-\-addr ,
+over HTTP. Tools are namespaced \fIserver\fB__\fItool\fR.
+.TP
+.B import
+Seed the catalog from
+.IR ~/.claude.json .
+Use
+.B \-\-redact
+to rewrite credentials as \fB${VAR}\fR references.
+.TP
+.B profile \fR[\fBlist\fR | \fBsave\fR \fIname\fR | \fBdelete\fR \fIname\fR]
+List the profiles in the catalog, save the selection (or \fB\-\-select\fR) as one,
+or remove one.
+.TP
+.B login \fIserver\fR
+Run the OAuth flow for a remote server: protected-resource discovery, dynamic
+client registration, then an authorization-code exchange with PKCE against a
+loopback redirect. The authorization URL is printed rather than opened. The
+token is stored in \fI~/.mcpick/state/tokens.json\fR and attached automatically afterwards.
+.TP
+.B logout \fIserver\fR
+Forget the stored token for a server.
+.TP
+.B targets
+List the agents mcpick knows and how each one is reached.
+.TP
+.B restore
+Put back every project file a session left rewritten, including sessions on
+other hosts sharing the workspace. Launches do this automatically for sessions
+on the same host whose process has ended.
+.SH OPTIONS
+.TP
+.BI \-\-uid " ID"
+Session id. Keys the saved selection and replaces \fB{UUID}\fR in the catalog.
+Defaults to the hostname, which inside a container is the container id.
+.TP
+.BI \-\-file " PATH"
+Catalog file. Defaults to
+.I <root>/.mcp.yaml
+or
+.IR <root>/.mcp.json .
+.TP
+.BI \-\-target " NAME"
+Agent dialect to render for. Defaults to the command name.
+.TP
+.BI \-\-profile " NAME"
+Use a named profile from the catalog and skip the picker.
+.TP
+.BI \-\-select " A,B"
+Use exactly these servers and skip the picker.
+.TP
+.BI \-\-addr " HOST:PORT"
+With
+.BR serve ,
+listen on HTTP instead of stdio. Only loopback addresses are accepted, because
+the proxy has no authentication.
+.TP
+.BI \-\-home " DIR"
+Where mcpick keeps everything it writes. Overrides \fB$MCPICK_HOME\fR; the
+default is \fI~/.mcpick\fR.
+.TP
+.BI \-\-timeout " DURATION"
+Per-server connect timeout. Default 15s.
+.TP
+.B \-\-redact
+With
+.BR import ,
+rewrite secrets as \fB${VAR}\fR references.
+.TP
+.B \-\-json
+Machine-readable output for
+.BR list ", " doctor " and " measure .
+.TP
+.BR \-y ", " \-\-last
+Skip the picker and reuse the saved selection.
+.TP
+.B \-\-all
+Select every server and skip the picker.
+.TP
+.B \-\-none
+Select nothing and skip the picker.
+.SH KEYS
+In the picker:
+.BR \[u2191]\[u2193] / jk
+move,
+.B space
+toggles (checking a server disabled in Claude Code re-enables it there at launch),
+.B /
+filters,
+.B m
+measures,
+.B a
+and
+.B n
+select all and none,
+.B s
+and
+.B l
+save and load a profile,
+.B +
+adds a server,
+.B d
+deletes one,
+.B enter
+launches,
+.B q
+aborts.
+.SH FILES
+.TP
+.I <root>/.mcp.yaml
+The catalog. Also read:
+.IR <root>/.mcp.json .
+.TP
+.I ~/.mcpick/
+mcpick's home, mode 0700; see \fB\-\-home\fR. It holds:
+.RS
+.TP
+.I selections/<workspace>-<hash>/<uid>.json
+The saved selection: server names only.
+.TP
+.I state/
+OAuth tokens, measured context costs, and records for restoring project files.
+.TP
+.I run/
+Rendered configs and overlays. They contain expanded secrets, are mode 0600, and
+are removed once the process that owns them has ended.
+.RE
+.TP
+.I ~/.claude.json
+Read for project- and global-scope servers.
+.TP
+.I ~/.claude/plugins/
+Enabled plugins' servers are read so the selection can keep them;
+\fB\-\-strict\-mcp\-config\fR drops them otherwise.
+.SH ENVIRONMENT
+.TP
+.B MCPICK_CONFIG
+Set on the launched command, pointing at the rendered config.
+.TP
+.B MCPICK_HOME
+mcpick's home, as for \fB\-\-home\fR.
+.TP
+.B MCPICK_DEBUG
+When set, print the exact command mcpick runs, environment and real paths
+included, just before launching it.
+.TP
+.B MCPICK_SERVE_ALLOW_REMOTE
+Set to 1 to let \fBserve \-\-addr\fR bind a non-loopback address. Only behind
+authentication of your own.
+.TP
+.B CLAUDE_CONFIG_DIR
+Where Claude Code's configuration, and so \fI.claude.json\fR and plugins, live.
+.TP
+.B XDG_CONFIG_HOME
+Located for the agents configured through it (Muse, opencode).
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+An error, or an unreachable server under
+.BR doctor .
+.TP
+.B 128+n
+The launched command died of signal \fIn\fR.
+.TP
+.B 130
+The picker was aborted.
+.PP
+Otherwise, the exit status of the launched command.
+.SH EXAMPLES
+Pick interactively and launch Claude Code:
+.PP
+.RS
+.B mcpick run claude
+.RE
+.PP
+Reuse the last selection in a script:
+.PP
+.RS
+.B mcpick -y run codex
+.RE
+.PP
+Find out what is eating the context window:
+.PP
+.RS
+.B mcpick measure
+.RE
+.PP
+Give every agent one entry that never changes:
+.PP
+.RS
+.B mcpick --profile review serve
+.RE
+.SH SEE ALSO
+The MCP specification at
+.UR https://modelcontextprotocol.io
+.UE .

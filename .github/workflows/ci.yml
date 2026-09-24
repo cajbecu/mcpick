@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# go.mod states the oldest Go that can build mcpick, not the one to build it
+# with: setup-go's go-version-file would install exactly that release, patch
+# level included, and every standard-library fix since then would be missing.
+# Everything here builds with the current stable toolchain; one job keeps the
+# stated minimum honest.
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - run: go build ./...
+      - run: go test ./...
+      # The proxy and the MCP client fan out over goroutines; the race
+      # detector needs cgo, which is only guaranteed on the Linux runner.
+      - if: matrix.os == 'ubuntu-latest'
+        run: go test -race ./...
+
+  minimum-go:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go build ./...
+      - run: go test ./...
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "not gofmt'd:"; echo "$unformatted"; exit 1
+          fi
+      - run: go vet ./...
+      # v8 of the action runs golangci-lint v2, which is what .golangci.yaml
+      # is written for; v6 installs the v1 line, built with an older Go than
+      # this module targets, and refuses to start.
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: latest
+      - name: go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # govulncheck judges the standard library of the toolchain it runs
+      # with, so it has to be the toolchain releases are built with.
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: govulncheck ./...
+
+  # Builds every release artefact without publishing, so a broken release
+  # config fails a pull request instead of a tag.
+  release-dry-run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: latest
+          args: release --snapshot --clean
+        env:
+          HOMEBREW_TAP_TOKEN: ""
+
+  # vendorHash in flake.nix is a hash of the Go dependencies; a go.mod change
+  # that forgets it breaks `nix build` for every Nix user. This job notices.
+  nix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: cachix/install-nix-action@v31
+      - run: nix build -L
+      - run: ./result/bin/mcpick --version
+
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          check-latest: true
+      - name: build and vet every released target
+        run: |
+          set -euo pipefail
+          for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os="${pair%/*}"; arch="${pair#*/}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o /dev/null .
+            GOOS="$os" GOARCH="$arch" go vet ./...
+            echo "ok $pair"
+          done
