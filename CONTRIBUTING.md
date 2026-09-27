@@ -135,8 +135,11 @@ the two cannot drift. To release:
    changelog, and attests the provenance of the assets.
 
 A snapshot of the release build runs on every pull request
-(`goreleaser release --snapshot`), so a broken release configuration fails
-before a tag does.
+(`HOMEBREW_TAP_TOKEN= goreleaser release --snapshot --clean`; the variable
+must be set, even empty), so a broken release configuration fails before a
+tag does. It does not exercise the upload of the Homebrew cask, which only a
+real release reaches; keep the cask's templates to `.Env` and the basic
+template functions.
 
 ## Recording decisions
 

@@ -67,9 +67,9 @@ nfpms:
 
 # Homebrew. Casks are GoReleaser's current Homebrew format (formulas are
 # deprecated there). The cask lives in a separate tap repository and is pushed
-# with a token that can write to it; without the token — unset or empty —
-# the upload is skipped, so a release or a local snapshot never fails for
-# want of it.
+# with a token that can write to it; with an empty token the upload is
+# skipped, so a release never fails for want of it. The variable itself must
+# be set (see token below).
 homebrew_casks:
   - name: mcpick
     homepage: https://github.com/cajbecu/mcpick
@@ -84,8 +84,12 @@ homebrew_casks:
     repository:
       owner: cajbecu
       name: homebrew-tap
-      token: '{{ envOrDefault "HOMEBREW_TAP_TOKEN" "" }}'
-    skip_upload: '{{ if not (isEnvSet "HOMEBREW_TAP_TOKEN") }}true{{ end }}'
+      # The cask's token is templated with .Env only (envOrDefault and
+      # isEnvSet are not defined there), so the variable must exist: the
+      # release workflow always sets it, empty when the secret is missing,
+      # and a local run needs HOMEBREW_TAP_TOKEN= in front.
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    skip_upload: '{{ if eq .Env.HOMEBREW_TAP_TOKEN "" }}true{{ end }}'
     commit_msg_template: "mcpick {{ .Tag }}"
     # The binary is not signed with an Apple Developer ID, so Gatekeeper
     # would call it damaged. Removing the quarantine flag after install is the
