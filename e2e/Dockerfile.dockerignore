@@ -1,0 +1,13 @@
+# The build context is an allowlist: nothing enters the image but the Go
+# source and module files the build needs. A developer's .env, a catalog
+# with inline credentials, agent settings, keys, the git history and built
+# artefacts all stay out of the builder and its cache (e2e/context_test.go
+# checks this with secret-shaped fixtures; the build stage checks it again).
+*
+!go.mod
+!go.sum
+!main.go
+!internal/**/*.go
+!e2e/go.mod
+!e2e/fakemcp/*.go
+!e2e/runner/*.go

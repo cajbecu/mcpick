@@ -2,14 +2,22 @@
 # zsh completion for mcpick
 # install: cp completions/_mcpick ~/.local/share/zsh/site-functions/_mcpick
 
+# Server names come from `mcpick __complete servers`: one per line, and only
+# names made of letters, digits and . _ - @ / +, so they need no quoting.
 _mcpick_servers() {
     local -a names
-    names=(${(f)"$(mcpick list 2>/dev/null | awk '{print $1}')"})
-    _describe 'server' names
+    names=(${(f)"$(mcpick __complete servers 2>/dev/null)"})
+    compadd -a names
+}
+
+_mcpick_select() {
+    local -a names
+    names=(${(f)"$(mcpick __complete servers 2>/dev/null)"})
+    (( $#names )) && _values -s , 'server' $names
 }
 
 _mcpick() {
-    local -a commands targets
+    local -a commands agents
     commands=(
         'run:pick, render a config and launch a command'
         'list:print the merged catalog'
@@ -18,30 +26,34 @@ _mcpick() {
         'export:print the selection in a tool dialect'
         'serve:run as one MCP server fronting the selection'
         'import:seed the catalog from ~/.claude.json'
-        'profile:list, save or delete profiles'
+        'move:move a server to project, local or user'
+        'profile:list, save, delete or rename profiles'
         'login:run the OAuth flow for a remote server'
         'logout:forget a stored token'
-        'targets:list the agents mcpick can launch'
+        'agents:list the agents mcpick can launch'
         'restore:undo a project file left behind by a crash'
     )
-    targets=(claude codex copilot pi muse opencode gemini antigravity grok devin)
+    agents=(claude codex copilot pi muse opencode gemini antigravity grok devin)
 
     _arguments -C \
         '--uid[session id]:uid:' \
         '--file[catalog file]:file:_files' \
-        '--target[agent dialect]:target:(${targets})' \
-        '--profile[named profile from the catalog]:profile:' \
-        '--select[exact server list]:servers:_mcpick_servers' \
+        '--agent[agent to render for]:agent:(${agents})' \
+        '--profile[named profile: yours, the catalog'"'"'s, or default]:profile:' \
+        '--select[exact server list]:servers:_mcpick_select' \
         '--addr[serve over HTTP]:addr:' \
         '--home[where mcpick keeps its files]:directory:_files -/' \
         '--timeout[per-server connect timeout]:duration:' \
-        '--redact[rewrite secrets as ${VAR} on import]' \
+        '--redact[move: rewrite secrets as ${VAR} (import does by default)]' \
+        '--yes[import: copy credentials as they are; move: write them into the catalog as they are]' \
+        '--trust[measure, doctor: run and remember untrusted commands]' \
+        '--trust-catalog[measure, doctor: trust this project'"'"'s catalog for measuring]' \
         '--json[machine-readable output]' \
         '(-y --last)'{-y,--last}'[reuse the saved selection]' \
         '--all[select everything]' \
         '--none[select nothing]' \
         '(-h --help)'{-h,--help}'[show help]' \
-        '--version[print version]' \
+        '(-V --version)'{-V,--version}'[print version]' \
         '1: :->command' \
         '*:: :->rest'
 
@@ -50,6 +62,16 @@ _mcpick() {
         rest)
             # After `run`, complete the agent command rather than mcpick flags.
             [[ $words[1] == run ]] && _command_names -e
+            if [[ $words[1] == move ]]; then
+                if (( CURRENT == 2 )); then
+                    _mcpick_servers
+                else
+                    _values 'group' project local user
+                fi
+            fi
+            if [[ $words[1] == profile ]] && (( CURRENT == 2 )); then
+                _values 'action' list save delete rename
+            fi
             ;;
     esac
 }

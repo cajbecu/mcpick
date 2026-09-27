@@ -52,7 +52,10 @@ func fakeStdioServer() {
 			time.Sleep(10 * time.Millisecond)
 			result = `{"content":[{"type":"text","text":"ok"}]}`
 		case "crash":
-			fmt.Fprintln(os.Stderr, "fatal: the server fell over")
+			// With a terminal escape in its last words, as a real
+			// server's log line may carry: it must reach the error as
+			// text, never as an escape.
+			fmt.Fprintln(os.Stderr, "fatal: the server fell over \x1b[2J\u009b2J")
 			os.Exit(3)
 		default:
 			fmt.Printf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32601,"message":"nope"}}`+"\n", *req.ID)

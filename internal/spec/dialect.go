@@ -1,8 +1,8 @@
-// Package spec is the canonical model of one MCP server entry and every
-// dialect mcpick reads and writes: Claude, Codex and Grok TOML, Gemini,
-// Antigravity, Copilot, opencode, Muse and pi. It also owns placeholder
-// expansion and the splicing of generated server blocks into files the user
-// owns.
+// Package spec is the canonical model of one MCP server entry and the
+// machinery for writing it in an agent's format: generic JSON and TOML
+// dialects that each backend configures, placeholder expansion, and the
+// splicing of generated server blocks into files the user owns. The formats
+// of particular agents live with their backends, in internal/backend.
 package spec
 
 import (
@@ -35,43 +35,40 @@ var knownSpecKeys = map[string]bool{
 	"env": true, "environment": true, "enabled": true,
 }
 
-// dialectKeys are extras that mean something to exactly one agent. They pass
-// through to that agent and are dropped for every other: a Codex-only key in a
-// Claude config is at best ignored and at worst fails validation for the whole
-// file.
-var dialectKeys = map[string]map[string]bool{
-	"codex": {
-		"bearer_token_env_var": true, "env_http_headers": true, "env_vars": true,
-		"startup_timeout_sec": true, "tool_timeout_sec": true, "enabled_tools": true,
-		"disabled_tools": true, "required": true, "auth": true, "cwd": true,
-		"default_tools_approval_mode": true, "http_headers_helper": true,
-	},
-	"gemini": {
-		"timeout": true, "trust": true, "includeTools": true, "excludeTools": true,
-		"authProviderType": true, "targetAudience": true, "targetServiceAccount": true,
-		"cwd": true, "oauth": true,
-	},
-	"copilot": {"tools": true},
-	"pi": {
-		"lifecycle": true, "idleTimeout": true, "directTools": true, "debug": true,
-		"inheritEnv": true, "literalEnv": true, "protocolVersion": true,
-	},
+// owners records which agents understand a catalog key that is not part of
+// the common shape. Such a key passes through to those agents and is dropped
+// for every other: a Codex-only key in a Claude config is at best ignored and
+// at worst fails validation for the whole file. Backends declare their keys
+// when they register.
+var owners = map[string]map[string]bool{}
+
+// Own declares that key is understood by agent.
+func Own(agent string, keys ...string) {
+	for _, k := range keys {
+		if owners[k] == nil {
+			owners[k] = map[string]bool{}
+		}
+		owners[k][agent] = true
+	}
 }
 
-// extraAllowed reports whether key may be emitted for dialect: keys nobody
-// claims pass everywhere (a newer key mcpick has not heard of), keys a dialect
-// owns pass only there.
-func extraAllowed(dialect, key string) bool {
-	owned := false
-	for d, keys := range dialectKeys {
-		if keys[key] {
-			if d == dialect {
-				return true
-			}
-			owned = true
+// ExtraAllowed reports whether key may be written for agent: a key nobody
+// claims passes everywhere (a newer key mcpick has not heard of), a claimed
+// key only to the agents that claim it.
+func ExtraAllowed(agent, key string) bool {
+	o := owners[key]
+	return len(o) == 0 || o[agent]
+}
+
+// Extras are the entries of v.Extra that may be written for agent.
+func Extras(agent string, v View) map[string]any {
+	out := map[string]any{}
+	for k, val := range v.Extra {
+		if ExtraAllowed(agent, k) {
+			out[k] = val
 		}
 	}
-	return !owned
+	return out
 }
 
 func ViewOf(spec map[string]any) View {
@@ -161,7 +158,8 @@ func SortedKeys[T any](m map[string]T) []string {
 	return out
 }
 
-func stringMap(m map[string]string) map[string]any {
+// StringMap converts a string map for JSON encoding.
+func StringMap(m map[string]string) map[string]any {
 	out := make(map[string]any, len(m))
 	for k, v := range m {
 		out[k] = v
@@ -169,7 +167,8 @@ func stringMap(m map[string]string) map[string]any {
 	return out
 }
 
-func toAnySlice(in []string) []any {
+// AnySlice converts a string slice for JSON encoding.
+func AnySlice(in []string) []any {
 	out := make([]any, len(in))
 	for i, s := range in {
 		out[i] = s
@@ -177,125 +176,105 @@ func toAnySlice(in []string) []any {
 	return out
 }
 
-// jsonDialect describes one JSON-shaped agent config.
-type jsonDialect struct {
-	name     string
-	topKey   string
-	withType bool
-	// defaults are keys the agent requires that other dialects do not have;
-	// a catalog value for the key wins.
-	defaults map[string]any
-	// urlKey picks the key for a remote URL; Gemini uses a different one per
-	// transport.
-	urlKey func(transport string) string
+// Dialect renders a selection in one agent's config format.
+type Dialect interface {
+	Emit(sel Selection) ([]byte, error)
 }
 
-func fixedURL(key string) func(string) string { return func(string) string { return key } }
+// Lossy is implemented by a dialect that cannot carry everything a catalog
+// entry can hold; it names what would silently be lost.
+type Lossy interface {
+	Lossy(sel Selection) []string
+}
 
-var (
-	dialectClaude = jsonDialect{name: "claude", topKey: "mcpServers", withType: true, urlKey: fixedURL("url")}
-	dialectGemini = jsonDialect{name: "gemini", topKey: "mcpServers", urlKey: func(t string) string {
-		if t == "sse" {
-			return "url"
-		}
-		return "httpUrl"
-	}}
-	dialectAntigravity = jsonDialect{name: "antigravity", topKey: "mcpServers", urlKey: fixedURL("serverUrl")}
-	dialectMuse        = jsonDialect{name: "muse", topKey: "mcp_servers", withType: true, urlKey: fixedURL("url")}
-	dialectPi          = jsonDialect{name: "pi", topKey: "mcpServers", urlKey: fixedURL("url")}
-	// Copilot's user config lists the tools to expose; without "tools" the
-	// server connects and offers nothing.
-	dialectCopilot = jsonDialect{name: "copilot", topKey: "mcpServers", withType: true,
-		urlKey: fixedURL("url"), defaults: map[string]any{"tools": []any{"*"}}}
-)
+// JSON is the shape most agents share: a map of servers under one key, each
+// with a URL or a command line. What differs is configured here.
+type JSON struct {
+	Agent  string // whose keys (see Own) this dialect writes
+	TopKey string // "mcpServers", "mcp_servers", ...
+	// Type writes the transport as "type".
+	Type bool
+	// URLKey holds a remote server's address: "url" when empty. SSEURLKey,
+	// when set, is used for legacy SSE servers instead (Gemini tells the two
+	// transports apart by the key alone).
+	URLKey, SSEURLKey string
+	// Defaults are keys the agent requires that others do not have; a
+	// catalog value for the key wins.
+	Defaults map[string]any
+}
 
-func (d jsonDialect) entry(v View) map[string]any {
+func (d JSON) urlKey(transport string) string {
+	if transport == "sse" && d.SSEURLKey != "" {
+		return d.SSEURLKey
+	}
+	if d.URLKey != "" {
+		return d.URLKey
+	}
+	return "url"
+}
+
+// Entry renders one server.
+func (d JSON) Entry(v View) map[string]any {
 	out := map[string]any{}
-	for k, val := range d.defaults {
+	for k, val := range d.Defaults {
 		out[k] = val
 	}
-	for k, val := range v.Extra {
-		if extraAllowed(d.name, k) {
-			out[k] = val
-		}
+	for k, val := range Extras(d.Agent, v) {
+		out[k] = val
 	}
-	if d.withType {
+	if d.Type {
 		out["type"] = v.Transport
 	}
 	if v.Remote() {
 		out[d.urlKey(v.Transport)] = v.URL
 		if len(v.Headers) > 0 {
-			out["headers"] = stringMap(v.Headers)
+			out["headers"] = StringMap(v.Headers)
 		}
 	} else {
 		out["command"] = v.Command
 		if len(v.Args) > 0 {
-			out["args"] = toAnySlice(v.Args)
+			out["args"] = AnySlice(v.Args)
 		}
 	}
 	if len(v.Env) > 0 {
-		out["env"] = stringMap(v.Env)
+		out["env"] = StringMap(v.Env)
 	}
 	return out
 }
 
-func (d jsonDialect) emit(sel Selection) ([]byte, error) {
+func (d JSON) Emit(sel Selection) ([]byte, error) {
 	servers := map[string]any{}
 	for _, n := range sel.Names {
-		servers[n] = d.entry(ViewOf(sel.Specs[n]))
+		servers[n] = d.Entry(ViewOf(sel.Specs[n]))
 	}
-	data, err := json.MarshalIndent(map[string]any{d.topKey: servers}, "", "  ")
+	return MarshalIndented(map[string]any{d.TopKey: servers})
+}
+
+// MarshalIndented is JSON as agents' config files are written: two-space
+// indent, trailing newline.
+func MarshalIndented(v any) ([]byte, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return nil, err
 	}
 	return append(data, '\n'), nil
 }
 
-func EmitClaude(sel Selection) ([]byte, error)      { return dialectClaude.emit(sel) }
-func EmitGemini(sel Selection) ([]byte, error)      { return dialectGemini.emit(sel) }
-func EmitAntigravity(sel Selection) ([]byte, error) { return dialectAntigravity.emit(sel) }
-func EmitMuse(sel Selection) ([]byte, error)        { return dialectMuse.emit(sel) }
-func EmitPi(sel Selection) ([]byte, error)          { return dialectPi.emit(sel) }
-func EmitCopilot(sel Selection) ([]byte, error)     { return dialectCopilot.emit(sel) }
+// Claude is Claude Code's own format. It is also what mcpick writes for an
+// agent it has no adapter for, and the shape of its catalog.
+var Claude = JSON{Agent: "claude", TopKey: "mcpServers", Type: true}
 
-func EmitOpencode(sel Selection) ([]byte, error) {
-	servers := map[string]any{}
-	for _, n := range sel.Names {
-		v := ViewOf(sel.Specs[n])
-		entry := map[string]any{"enabled": true}
-		for k, val := range v.Extra {
-			if extraAllowed("opencode", k) {
-				entry[k] = val
-			}
-		}
-		if v.Remote() {
-			entry["type"] = "remote"
-			entry["url"] = v.URL
-			if len(v.Headers) > 0 {
-				entry["headers"] = stringMap(v.Headers)
-			}
-		} else {
-			entry["type"] = "local"
-			entry["command"] = append([]any{v.Command}, toAnySlice(v.Args)...)
-			if len(v.Env) > 0 {
-				entry["environment"] = stringMap(v.Env)
-			}
-		}
-		servers[n] = entry
-	}
-	data, err := json.MarshalIndent(map[string]any{
-		"$schema": "https://opencode.ai/config.json",
-		"mcp":     servers,
-	}, "", "  ")
-	if err != nil {
-		return nil, err
-	}
-	return append(data, '\n'), nil
+// TOML is the [mcp_servers.<name>] format Codex and Grok use.
+type TOML struct {
+	Agent string // whose keys (see Own) this dialect writes
+	// Headers names the header table: Codex calls it http_headers, Grok
+	// headers.
+	Headers string
+	// NoSSE marks an agent that cannot speak the legacy SSE transport.
+	NoSSE bool
 }
 
-// emitTOML writes the [mcp_servers.<name>] dialect used by Codex and Grok.
-// Codex spells the header table http_headers; Grok uses headers.
-func emitTOML(sel Selection, dialect, headerTable string) ([]byte, error) {
+func (d TOML) Emit(sel Selection) ([]byte, error) {
 	var b strings.Builder
 	for _, n := range sel.Names {
 		v := ViewOf(sel.Specs[n])
@@ -309,7 +288,7 @@ func emitTOML(sel Selection, dialect, headerTable string) ([]byte, error) {
 			}
 		}
 		for _, k := range SortedKeys(v.Extra) {
-			if !extraAllowed(dialect, k) {
+			if !ExtraAllowed(d.Agent, k) {
 				continue
 			}
 			if val, ok := tomlScalar(v.Extra[k]); ok {
@@ -323,7 +302,7 @@ func emitTOML(sel Selection, dialect, headerTable string) ([]byte, error) {
 			}
 		}
 		if v.Remote() && len(v.Headers) > 0 {
-			fmt.Fprintf(&b, "\n[mcp_servers.%s.%s]\n", tomlKey(n), headerTable)
+			fmt.Fprintf(&b, "\n[mcp_servers.%s.%s]\n", tomlKey(n), d.Headers)
 			for _, k := range SortedKeys(v.Headers) {
 				fmt.Fprintf(&b, "%s = %s\n", tomlKey(k), tomlString(v.Headers[k]))
 			}
@@ -333,18 +312,16 @@ func emitTOML(sel Selection, dialect, headerTable string) ([]byte, error) {
 	return []byte(b.String()), nil
 }
 
-func EmitCodex(sel Selection) ([]byte, error) { return emitTOML(sel, "codex", "http_headers") }
-func EmitGrok(sel Selection) ([]byte, error)  { return emitTOML(sel, "grok", "headers") }
-
-// Lossy reports what a dialect cannot carry, so a server that quietly
-// disappears becomes a message instead of a mystery.
-func Lossy(tool string, sel Selection) []string {
+// Lossy names the servers the agent will not be able to reach.
+func (d TOML) Lossy(sel Selection) []string {
+	if !d.NoSSE {
+		return nil
+	}
 	var out []string
 	for _, n := range sel.Names {
-		v := ViewOf(sel.Specs[n])
-		if tool == "codex" && v.Transport == "sse" {
+		if ViewOf(sel.Specs[n]).Transport == "sse" {
 			out = append(out, fmt.Sprintf(
-				"%s: codex speaks stdio and streamable HTTP only; this legacy SSE server will not connect", n))
+				"%s: %s speaks stdio and streamable HTTP only; this legacy SSE server will not connect", n, d.Agent))
 		}
 	}
 	return out
@@ -543,7 +520,11 @@ func spliceJSON(original, generated []byte, topKey string) ([]byte, error) {
 		return nil, err
 	}
 	for k, v := range gen {
-		if k == topKey || k == "$schema" {
+		// The server block and the schema pointer are mcpick's to replace.
+		// Anything else a dialect emits is a document-level key the agent
+		// insists on (muse's schema_version): it fills a gap in a new file
+		// and never overrides what the user's file says.
+		if _, have := top[k]; k == topKey || k == "$schema" || !have {
 			top[k] = v
 		}
 	}

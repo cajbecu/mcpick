@@ -45,6 +45,16 @@ check-cross:
         CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" go build -o /dev/null . && echo "ok $pair"
     done
 
+# End to end, in Docker: an image with every agent CLI and fake MCP servers
+# (e2e/Dockerfile); the runner picks in the real picker under tmux, launches
+# each agent with that selection and checks it loads exactly those servers.
+# Needs Docker and network for the build; no credential leaves this machine.
+# `just e2e -v` prints frames and output, `just e2e -only gemini,codex` narrows.
+e2e *ARGS:
+    cd e2e && go test ./...
+    docker build -f e2e/Dockerfile -t mcpick-e2e .
+    docker run --rm mcpick-e2e {{ARGS}}
+
 install: build
     install -d ~/.local/bin
     install -m 0755 dist/mcpick ~/.local/bin/mcpick

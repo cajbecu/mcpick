@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -89,6 +90,15 @@ func projectEntry(top map[string]json.RawMessage, key string) map[string]json.Ra
 	return entry
 }
 
+// claudeServers is the server map of one origin in ~/.claude.json, as raw
+// JSON: the top-level one for user, the project entry's for local.
+func claudeServers(top map[string]json.RawMessage, projectKey, origin string) json.RawMessage {
+	if origin == OriginLocal {
+		return projectServers(top, projectKey)
+	}
+	return top["mcpServers"]
+}
+
 func projectServers(top map[string]json.RawMessage, key string) json.RawMessage {
 	return projectEntry(top, key)["mcpServers"]
 }
@@ -112,29 +122,65 @@ func disabledServers(top map[string]json.RawMessage, key string) map[string]bool
 	return out
 }
 
+// claudeLockWait is how long an edit of ~/.claude.json waits for the lock
+// another mcpick holds; claudeLockStale is when a leftover lock is ignored.
+var (
+	claudeLockWait  = 2 * time.Second
+	claudeLockStale = 30 * time.Second
+)
+
+// lockClaudeJSON is what every edit of ~/.claude.json starts with: the lock,
+// the file as it is, and a timestamped backup of it (five kept). The caller
+// holds the lock until unlock. A file that does not exist yet reads as empty
+// with no backup, so a first server can be written into a fresh config.
+func lockClaudeJSON(path string) (data []byte, backup string, unlock func(), err error) {
+	if path == "" {
+		return nil, "", nil, fmt.Errorf("no home directory, cannot locate .claude.json")
+	}
+	unlock, err = fsutil.Lock(path, claudeLockWait, claudeLockStale)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	data, err = os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			unlock()
+			return nil, "", nil, err
+		}
+		return nil, "", unlock, nil
+	}
+	// Nanoseconds, and never over an existing file: a move writes the file
+	// twice within a second, and a backup named by the second alone was
+	// overwritten by the second write's, losing the state before the move.
+	backup = fmt.Sprintf("%s.mcpick-bak-%s", path, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := writeNew(backup, data); err != nil {
+		unlock()
+		return nil, "", nil, fmt.Errorf("writing backup: %w", err)
+	}
+	pruneBackups(path, 5)
+	return data, backup, unlock, nil
+}
+
 // DeleteFromClaudeJSON removes one server from ~/.claude.json, from the
-// top-level map (origin global) or from the project entry (origin project).
+// top-level map (origin user) or from the project entry (origin local).
 // Everything else is round-tripped as raw JSON in its original order, under a
 // lock, after a timestamped backup.
 func DeleteFromClaudeJSON(path, projectKey, name, origin string) error {
-	if path == "" {
-		return fmt.Errorf("no home directory, cannot locate .claude.json")
-	}
-	unlock, err := fsutil.Lock(path, 2*time.Second, 30*time.Second)
+	return deleteFromClaudeJSON(path, projectKey, name, origin, nil)
+}
+
+// deleteFromClaudeJSON is DeleteFromClaudeJSON with the move's rule: with
+// expect set, the entry has to still be what expect says — the definition
+// the caller loaded — or it is left alone and reported as changed.
+func deleteFromClaudeJSON(path, projectKey, name, origin string, expect map[string]any) error {
+	data, _, unlock, err := lockClaudeJSON(path)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
+	if data == nil {
+		return fmt.Errorf("%s does not exist", fsutil.ShortenHome(path))
 	}
-	backup := fmt.Sprintf("%s.mcpick-bak-%s", path, time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
-		return fmt.Errorf("writing backup: %w", err)
-	}
-	pruneBackups(path, 5)
 
 	top, order, err := spec.DecodeOrdered(data)
 	if err != nil {
@@ -146,19 +192,26 @@ func DeleteFromClaudeJSON(path, projectKey, name, origin string) error {
 		if err != nil {
 			return nil, err
 		}
-		if _, ok := servers[name]; !ok {
+		raw, ok := servers[name]
+		if !ok {
 			return nil, fmt.Errorf("%s not found in %s mcpServers", name, where)
+		}
+		if expect != nil {
+			var have map[string]any
+			if json.Unmarshal(raw, &have) != nil || !reflect.DeepEqual(have, expect) {
+				return nil, changedError(name)
+			}
 		}
 		delete(servers, name)
 		return spec.MarshalOrdered(servers, sorder)
 	}
 
 	switch origin {
-	case OriginGlobal:
-		if top["mcpServers"], err = dropFrom(top["mcpServers"], "global"); err != nil {
+	case OriginUser:
+		if top["mcpServers"], err = dropFrom(top["mcpServers"], "user"); err != nil {
 			return err
 		}
-	case OriginProject:
+	case OriginLocal:
 		projects, porder, err := spec.DecodeOrdered(top["projects"])
 		if err != nil {
 			return err
@@ -167,8 +220,82 @@ func DeleteFromClaudeJSON(path, projectKey, name, origin string) error {
 		if err != nil {
 			return err
 		}
-		if entry["mcpServers"], err = dropFrom(entry["mcpServers"], "project"); err != nil {
+		if entry["mcpServers"], err = dropFrom(entry["mcpServers"], "local"); err != nil {
 			return err
+		}
+		if projects[projectKey], err = spec.MarshalOrdered(entry, eorder); err != nil {
+			return err
+		}
+		if top["projects"], err = spec.MarshalOrdered(projects, porder); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("origin %q does not live in .claude.json", origin)
+	}
+
+	out, err := spec.MarshalOrdered(top, order)
+	if err != nil {
+		return err
+	}
+	return fsutil.WriteFileAtomic(path, out, fsutil.ModeOf(path, 0o600))
+}
+
+// AddToClaudeJSON writes one server into ~/.claude.json, into the top-level
+// map (origin user) or into the project entry under projectKey (origin
+// local), which is created when the file has none. A server of that name
+// already there is refused, not replaced. Everything else is round-tripped
+// as raw JSON in its original order, under the same lock and after the same
+// backup as DeleteFromClaudeJSON; the spec is written as given, placeholders
+// included, since Claude Code reads it as its own.
+func AddToClaudeJSON(path, projectKey, name, origin string, sp map[string]any) error {
+	data, _, unlock, err := lockClaudeJSON(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	top, order, err := spec.DecodeOrdered(data)
+	if err != nil {
+		return err
+	}
+	raw, err := marshalNoEscape(sp)
+	if err != nil {
+		return err
+	}
+	addTo := func(servers json.RawMessage, where string) (json.RawMessage, error) {
+		m, morder, err := spec.DecodeOrdered(servers)
+		if err != nil {
+			return nil, err
+		}
+		if _, ok := m[name]; ok {
+			return nil, fmt.Errorf("%s already exists in %s mcpServers of %s", name, where, fsutil.ShortenHome(path))
+		}
+		m[name] = raw
+		return spec.MarshalOrdered(m, append(morder, name))
+	}
+
+	switch origin {
+	case OriginUser:
+		if top["mcpServers"], err = addTo(top["mcpServers"], "user"); err != nil {
+			return err
+		}
+	case OriginLocal:
+		if projectKey == "" {
+			return fmt.Errorf("no project key for this workspace")
+		}
+		projects, porder, err := spec.DecodeOrdered(top["projects"])
+		if err != nil {
+			return err
+		}
+		entry, eorder, err := spec.DecodeOrdered(projects[projectKey])
+		if err != nil {
+			return err
+		}
+		if entry["mcpServers"], err = addTo(entry["mcpServers"], "local"); err != nil {
+			return err
+		}
+		if _, ok := projects[projectKey]; !ok {
+			porder = append(porder, projectKey)
 		}
 		if projects[projectKey], err = spec.MarshalOrdered(entry, eorder); err != nil {
 			return err
@@ -198,21 +325,14 @@ func EnableInClaude(path, projectKey string, entries []string) error {
 	if len(entries) == 0 {
 		return nil
 	}
-	unlock, err := fsutil.Lock(path, 2*time.Second, 30*time.Second)
+	data, backup, unlock, err := lockClaudeJSON(path)
 	if err != nil {
 		return err
 	}
 	defer unlock()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return err
+	if data == nil {
+		return fmt.Errorf("%s does not exist", fsutil.ShortenHome(path))
 	}
-	backup := fmt.Sprintf("%s.mcpick-bak-%s", path, time.Now().UTC().Format("20060102T150405Z"))
-	if err := os.WriteFile(backup, data, 0o600); err != nil {
-		return fmt.Errorf("writing backup: %w", err)
-	}
-	pruneBackups(path, 5)
 
 	drop := map[string]bool{}
 	for _, e := range entries {
@@ -279,6 +399,19 @@ func EnableInClaude(path, projectKey string, entries []string) error {
 		return err
 	}
 	return fsutil.WriteFileAtomic(path, out, fsutil.ModeOf(path, 0o600))
+}
+
+// writeNew writes a file that must not exist yet.
+func writeNew(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // pruneBackups keeps the newest keep backups of path. Each is a full copy of a

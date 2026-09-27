@@ -1,7 +1,7 @@
 # How mcpick launches each agent
 
 Agents differ in what they let you override for a single run. mcpick uses the
-least invasive mechanism each one offers. `mcpick targets` prints the same
+least invasive mechanism each one offers. `mcpick agents` prints the same
 information, with the documentation each adapter was written against.
 
 | Agent | How mcpick reaches it | Your files | Selection is exclusive? |
@@ -13,12 +13,11 @@ information, with the documentation each adapter was written against.
 | **pi** | overlay behind `PI_CODING_AGENT_DIR` | untouched | unless the adapter's shared files have servers |
 | **opencode** | overlay behind `XDG_CONFIG_HOME` | untouched | unless `./opencode.json` has servers |
 | **muse** | overlay behind `XDG_CONFIG_HOME` | untouched | yes, as far as documented |
-| **antigravity** (`agy`) | `.agents/mcp_config.json` | rewritten, restored on exit | no: the global config is merged in |
-| **grok** | `.grok/config.toml` | rewritten, restored on exit | no: it also reads `~/.claude.json`, `.mcp.json`, `.cursor/mcp.json` |
-| **devin** (CLI) | `.devin/config.json` | rewritten, restored on exit | yes, as far as documented |
+| **grok** | `.grok/config.toml` | rewritten, restored on exit | no: it also reads `~/.grok/config.toml`, `~/.claude.json`, `.mcp.json`, `.cursor/mcp.json` |
+| **devin** (CLI) | `.devin/mcp_config.json` | rewritten, restored on exit | yes, as far as documented |
 
 The command name picks the agent. A wrapper script gets the right treatment
-with `--target`: `mcpick --target claude run my-claude-wrapper`. Anything else
+with `--agent`: `mcpick --agent claude run my-claude-wrapper`. Anything else
 runs unchanged, with `MCPICK_CONFIG` pointing at a Claude-shaped config; the
 picker shows it as `? <command> (unknown agent)`.
 
@@ -51,7 +50,7 @@ to yours. Overlays need symlinks, which on Windows means Developer Mode.
 not just the agent's own directory; every other entry in it is a symlink, so
 tools the agent runs still find their config.
 
-## Project files (gemini, antigravity, grok, devin)
+## Project files (gemini, grok, devin)
 
 These agents offer no per-run override. mcpick writes the project's config
 file, keeps running while the agent does, and puts the file back when it
@@ -76,8 +75,8 @@ Claude Code keeps a list of servers you switched off (`disabledMcpServers` in
 checking it says what launching will do:
 
 ```
-[ ] claude_design   disabled in Claude Code           nothing changes; it does not load
-[x] claude_design   will be enabled in Claude Code    re-enabled in Claude Code at launch, and loads
+[ ] notion          disabled in Claude Code           nothing changes; it does not load
+[x] notion          will be enabled in Claude Code    re-enabled in Claude Code at launch, and loads
 ```
 
 Re-enabling is always an explicit choice: the picker opens with these servers
@@ -96,8 +95,37 @@ A plugin's server is disabled under its namespaced name,
 `plugin:<plugin>:<server>`; mcpick hands it over under its plain name, so it
 loads without an alias.
 
-## Not supported
+All of this applies to `claude` only. Other agents do not read Claude's
+settings, so for them a server disabled in Claude Code is an ordinary one.
 
-Devin's cloud product keeps its MCP servers server-side, configured through a
-web UI; there is no launch to put a picker in front of, and a cloud agent
-cannot reach `mcpick serve` on your machine.
+## Not supported (CLI)
+
+**Antigravity** (`agy`, installed by `antigravity.google/cli/install.sh`)
+reads MCP servers from `~/.gemini/config/mcp_config.json` and from plugins
+only. `mcpick run agy` launches the CLI unchanged, with one line on stderr
+saying so; nothing is written into the project. Rewriting the global file
+is not done: it would reach every workspace, well beyond one project's
+launch. The picker's command line and `mcpick agents` say the same.
+
+The Antigravity IDE reads `.agents/mcp_config.json` in the workspace
+(`serverUrl` for remote servers). mcpick does not launch the IDE, but it
+writes that shape: `mcpick --agent antigravity --profile review export >
+.agents/mcp_config.json` fills the file from the catalog, credentials
+expanded — keep it out of git.
+
+**Devin's cloud product** keeps its MCP servers server-side, configured
+through a web UI; there is no launch to put a picker in front of, and a cloud
+agent cannot reach `mcpick serve` on your machine.
+
+## Checked end to end
+
+`just e2e` (see CONTRIBUTING.md) launches each agent inside a container
+against fake MCP servers and checks that it loads exactly the selection:
+from `codex`, `copilot`, `grok`, `devin`, `gemini` and `opencode`'s own
+`mcp list`, and from what the fakes saw connect for `claude`, `pi`, `muse`,
+`opencode` and `gemini`. `agy mcp list` is run too, and checked only for
+what mcpick promises: launched unchanged, exit 0, the notice on stderr,
+nothing left in the project; the run records it as "not supported".
+Claude's `mcp list` ignores `--mcp-config` (anthropics/claude-code#15388); a
+headless `claude -p` connects to every configured server before it asks for
+a login, which is what the run relies on.

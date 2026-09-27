@@ -10,13 +10,19 @@
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        version = "0.1.0";
+        # VERSION is the one place the release version is written; the
+        # release process bumps it and tags the same commit (CONTRIBUTING.md,
+        # "Releasing"), and the release workflow refuses a tag that differs.
+        version = pkgs.lib.fileContents ./VERSION;
       in
       {
         packages.default = pkgs.buildGoModule {
           pname = "mcpick";
           inherit version;
           src = ./.;
+          # e2e/ is a module of its own that needs Docker; only the root
+          # command is built.
+          subPackages = [ "." ];
 
           # Hash of the Go module dependencies. When go.mod or go.sum change,
           # set it to pkgs.lib.fakeHash, run `nix build`, and paste the "got:" hash.

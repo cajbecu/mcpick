@@ -1,0 +1,33 @@
+name: e2e
+
+# The Docker end-to-end run (`just e2e`): an image with every agent CLI that
+# installs headless and the fake MCP servers, the real picker under tmux,
+# each agent launched with a selection and checked to load exactly it. It
+# depends on the agents' current npm releases and takes minutes, so it is
+# not on every pull request: nightly, and on demand. No secret is needed or
+# passed; the build context is an allowlist (e2e/Dockerfile.dockerignore).
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - working-directory: e2e
+        run: go test ./...
+      - run: docker build -f e2e/Dockerfile -t mcpick-e2e .
+      - run: docker run --rm mcpick-e2e -v

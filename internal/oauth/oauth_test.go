@@ -281,18 +281,20 @@ func TestAttachTokensAddsHeaderAndRefreshes(t *testing.T) {
 	as := newFakeAuthServer(t)
 	t.Setenv("MCPICK_HOME", t.TempDir())
 
-	store := LoadStore()
 	url := "https://example.com/mcp"
-	store.Tokens[Key("srv", url)] = Token{
+	err := Put(Key("srv", url), Token{
 		AccessToken: "stale", RefreshToken: "refresh-1", TokenType: "Bearer",
 		ExpiresAt: time.Now().Add(-time.Minute), TokenEndpoint: as.URL + "/token",
-	}
-	if err := store.Save(); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 
 	sel := oneSel("srv", map[string]any{"type": "http", "url": url})
-	refreshed := Attach(sel)
+	refreshed, err := Attach(sel)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(refreshed) != 1 || refreshed[0] != "srv" {
 		t.Fatalf("refreshed = %v, want [srv]", refreshed)
 	}
@@ -318,9 +320,7 @@ func TestAttachTokensAddsHeaderAndRefreshes(t *testing.T) {
 func TestAttachTokensLeavesCatalogHeaderAlone(t *testing.T) {
 	t.Setenv("MCPICK_HOME", t.TempDir())
 	url := "https://example.com/mcp"
-	store := LoadStore()
-	store.Tokens[Key("srv", url)] = Token{AccessToken: "stored", TokenType: "Bearer"}
-	if err := store.Save(); err != nil {
+	if err := Put(Key("srv", url), Token{AccessToken: "stored", TokenType: "Bearer"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -344,12 +344,10 @@ func TestTokenKeyChangesWithURL(t *testing.T) {
 func TestTokenStoreIsPrivate(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MCPICK_HOME", dir)
-	store := LoadStore()
-	store.Tokens["a@b"] = Token{AccessToken: "x"}
-	if err := store.Save(); err != nil {
+	if err := Put("a@b", Token{AccessToken: "x"}); err != nil {
 		t.Fatal(err)
 	}
-	fi, err := os.Stat(store.path)
+	fi, err := os.Stat(LoadStore().path)
 	if err != nil {
 		t.Fatal(err)
 	}

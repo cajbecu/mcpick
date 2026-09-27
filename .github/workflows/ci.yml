@@ -8,6 +8,10 @@ on:
 permissions:
   contents: read
 
+# Every third-party action is pinned to a commit, with the tag it was taken
+# from in a comment; Dependabot (.github/dependabot.yml) proposes the bumps.
+# Checkouts keep no credential in the tree: nothing here pushes.
+#
 # go.mod states the oldest Go that can build mcpick, not the one to build it
 # with: setup-go's go-version-file would install exactly that release, patch
 # level included, and every standard-library fix since then would be missing.
@@ -22,8 +26,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
@@ -37,8 +43,10 @@ jobs:
   minimum-go:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - run: go build ./...
@@ -47,8 +55,10 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
@@ -59,28 +69,51 @@ jobs:
             echo "not gofmt'd:"; echo "$unformatted"; exit 1
           fi
       - run: go vet ./...
-      # v8 of the action runs golangci-lint v2, which is what .golangci.yaml
+      # v8+ of the action runs golangci-lint v2, which is what .golangci.yaml
       # is written for; v6 installs the v1 line, built with an older Go than
       # this module targets, and refuses to start.
-      - uses: golangci/golangci-lint-action@v8
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
-          version: latest
+          version: v2.13.2
       - name: go.mod is tidy
         run: |
           go mod tidy
           git diff --exit-code -- go.mod go.sum
 
-  vuln:
+  # e2e/ is a module of its own (it needs Docker to run); its unit tests and
+  # lint run here, the Docker run is the e2e workflow.
+  e2e-module:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      # govulncheck judges the standard library of the toolchain it runs
-      # with, so it has to be the toolchain releases are built with.
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - working-directory: e2e
+        run: |
+          go vet ./...
+          go test ./...
+      - uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.13.2
+          working-directory: e2e
+
+  vuln:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # govulncheck judges the standard library of the toolchain it runs
+      # with, so it has to be the toolchain releases are built with.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - run: govulncheck ./...
 
   # Builds every release artefact without publishing, so a broken release
@@ -88,35 +121,43 @@ jobs:
   release-dry-run:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-go@v5
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
-      - uses: goreleaser/goreleaser-action@v6
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
-          version: latest
+          version: v2.18.2
           args: release --snapshot --clean
         env:
           HOMEBREW_TAP_TOKEN: ""
 
   # vendorHash in flake.nix is a hash of the Go dependencies; a go.mod change
-  # that forgets it breaks `nix build` for every Nix user. This job notices.
+  # that forgets it breaks `nix build` for every Nix user. This job notices,
+  # and checks that the binary reports the version VERSION names.
   nix:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: cachix/install-nix-action@v31
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
       - run: nix build -L
-      - run: ./result/bin/mcpick --version
+      - run: |
+          ./result/bin/mcpick --version
+          ./result/bin/mcpick --version | grep -F "$(cat VERSION)"
 
   cross:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true

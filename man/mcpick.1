@@ -10,9 +10,14 @@ mcpick \- choose which MCP servers a session loads, at the moment you launch it
 .br
 .B mcpick
 .RI [ options ]
-.BR list | doctor | measure | export | serve | import | profile
+.BR list | doctor | measure | export | serve | import | move | profile
 .br
-.B mcpick targets
+.B mcpick
+.RI [ options ]
+.BR login | logout
+.I server
+.br
+.BR "mcpick agents" | restore
 .SH DESCRIPTION
 Coding agents connect to every MCP server they can find and spend context on the
 tool definitions whether the session needs them or not.
@@ -21,16 +26,18 @@ puts a checkbox list in front of that: it merges the servers it can see, shows
 what each one costs in context, remembers what you picked, and launches the
 agent with only the checked ones.
 .PP
-Ten agents are supported. Which mechanism is used depends on what the agent
-offers: a command-line flag where one exists, an overlay of the agent's config
+Nine agents are supported; the Antigravity CLI
+.RB ( agy )
+is launched unchanged, with a notice. Which mechanism is used depends on what
+the agent offers: a command-line flag where one exists, an overlay of the agent's config
 directory where a directory variable exists, and a rewrite-and-restore of the
 project file otherwise. Run
-.B mcpick targets
+.B mcpick agents
 to see what applies to each.
 .SH COMMANDS
 .TP
 .B run \fIcommand\fR [\fIargs\fR...]
-Resolve a selection, render a config in the target's dialect and launch the
+Resolve a selection, render a config in the agent's dialect and launch the
 command. Everything after
 .B run
 is passed through untouched.
@@ -42,14 +49,28 @@ print it as JSON.
 .TP
 .B doctor
 Connect to each selected server and report tool count, context cost, latency and
-the reason for any failure. Exits non-zero if any server is unreachable.
+the reason for any failure. A stdio server whose command is not trusted is
+reported as skipped rather than run; see
+.BR \-\-trust .
+Exits non-zero if any server is unreachable or skipped.
 .TP
 .B measure
-Connect to every server in the catalog and cache its context cost, so the picker
-can show the numbers without connecting.
+Connect to every server in the catalog, print what each costs in context, most
+expensive first, and cache the numbers for
+.BR list .
+(The picker measures afresh with \fBm\fR; it never shows a cached number.) A
+stdio server's command runs only once trusted, and a remote server the
+project's catalog defines is contacted unselected only when its URL and
+headers hold no \fB${VAR}\fR or \fB{UUID}\fR, its host is public and no proxy
+applies (the address dialled is checked too), or once the catalog is
+trusted; see
+.BR \-\-trust-catalog .
+Servers left out are named on standard error, with what would lift that.
 .TP
 .B export
-Print the selection in a target's dialect on standard output.
+Print the selection in an agent's dialect on standard output. The output is
+the rendered config, credentials expanded; a warning on standard error says so
+when it holds any, and when nothing is selected.
 .TP
 .B serve
 Run mcpick itself as one MCP server fronting the selection, over stdio or, with
@@ -59,13 +80,36 @@ over HTTP. Tools are namespaced \fIserver\fB__\fItool\fR.
 .B import
 Seed the catalog from
 .IR ~/.claude.json .
-Use
-.B \-\-redact
-to rewrite credentials as \fB${VAR}\fR references.
+Credentials written in a spec \(em under a secret-sounding key, as the value
+of such a flag or of a \fB\-H\fR header in the arguments, in a URL's
+password or query, a token with a well-known prefix, or a
+\fBBearer\fR/\fBBasic\fR/\fBToken\fR value under any key \(em are rewritten as \fB${VAR:?export VAR}\fR
+references and the variables to export are printed;
+.B \-\-yes
+copies them as they are, with a warning.
 .TP
-.B profile \fR[\fBlist\fR | \fBsave\fR \fIname\fR | \fBdelete\fR \fIname\fR]
-List the profiles in the catalog, save the selection (or \fB\-\-select\fR) as one,
-or remove one.
+.B move \fIserver\fR \fBproject\fR|\fBlocal\fR|\fBuser\fR
+Move a server between the catalog (\fBproject\fR) and the local and user
+servers of \fI~/.claude.json\fR, as \fBv\fR in the picker does. The groups
+are named as Claude Code names its scopes. The
+destination is written first, then the source; a delete that fails says the
+server is now in both files. A name the destination already has is refused;
+plugin servers cannot be moved. Into the catalog, a server whose spec holds
+credentials written out needs
+.B \-\-yes
+(write them as they are) or
+.B \-\-redact
+(write \fB${VAR}\fR references and print what to export); on a terminal the
+question is asked, without one the move is refused. A server disabled in
+Claude Code stays disabled.
+.TP
+.B profile \fR[\fBlist\fR | \fBsave\fR \fIname\fR | \fBdelete\fR \fIname\fR | \fBrename\fR \fIold new\fR]
+List every profile with its source (yours, the catalog's, the built-in
+\fBdefault\fR), save the selection (or \fB\-\-select\fR) as one of yours,
+remove or rename one of yours. Yours live in \fI~/.mcpick/profiles.yaml\fR.
+A \fBprofiles:\fR key in the catalog is shared: mcpick lists and loads them,
+\fBc\fR in the picker copies one into yours, \fBd\fR (or \fBdelete\fR)
+deletes it from the file.
 .TP
 .B login \fIserver\fR
 Run the OAuth flow for a remote server: protected-resource discovery, dynamic
@@ -74,9 +118,9 @@ loopback redirect. The authorization URL is printed rather than opened. The
 token is stored in \fI~/.mcpick/state/tokens.json\fR and attached automatically afterwards.
 .TP
 .B logout \fIserver\fR
-Forget the stored token for a server.
+Forget the stored token for a server; exits 1 when there is none.
 .TP
-.B targets
+.B agents
 List the agents mcpick knows and how each one is reached.
 .TP
 .B restore
@@ -95,11 +139,17 @@ Catalog file. Defaults to
 or
 .IR <root>/.mcp.json .
 .TP
-.BI \-\-target " NAME"
-Agent dialect to render for. Defaults to the command name.
+.BI \-\-agent " NAME"
+Agent to render for. Defaults to the command name. The name is checked on
+every command;
+.B mcpick agents
+lists them.
 .TP
 .BI \-\-profile " NAME"
-Use a named profile from the catalog and skip the picker.
+Use a named profile and skip the picker: yours first, then the catalog's;
+\fBdefault\fR is the same as \fB\-\-all\fR (refused, with the way out, while
+the catalog defines its own \fBdefault\fR). Servers this project does not
+have are skipped with a warning.
 .TP
 .BI \-\-select " A,B"
 Use exactly these servers and skip the picker.
@@ -115,51 +165,124 @@ Where mcpick keeps everything it writes. Overrides \fB$MCPICK_HOME\fR; the
 default is \fI~/.mcpick\fR.
 .TP
 .BI \-\-timeout " DURATION"
-Per-server connect timeout. Default 15s.
+Per-server connect timeout, with its unit (\fI5s\fR, \fI2m\fR). Default 15s.
 .TP
 .B \-\-redact
 With
+.BR move ,
+rewrite secrets as \fB${VAR:?export VAR}\fR references.
+.B import
+does so by default; the flag is accepted there and changes nothing.
+With
+.B \-\-yes
+it is an error.
+.TP
+.B \-\-yes
+With
 .BR import ,
-rewrite secrets as \fB${VAR}\fR references.
+copy credentials as they are, with a warning; with
+.BR move ,
+write a server's credentials into the catalog as they are.
+.TP
+.B \-\-trust
+With
+.BR measure " and " doctor ,
+approve the commands of stdio servers not yet trusted \(em what the catalog
+says, without a prompt \(em and remember them as trusted for this project, in
+.IR ~/.mcpick/state/trust.json .
+Each command approved is printed on standard error before it runs.
+Without the flag, such servers are skipped and named.
+.TP
+.B \-\-trust-catalog
+With
+.BR measure " and " doctor ,
+trust this project's catalog as a whole, so that its remote servers are
+measured unselected, placeholders and private hosts included; what is trusted
+\(em the catalog file(s), each remote server with its URL and header names \(em
+is printed on standard error first. The trust is kept in
+.I ~/.mcpick/state/trust.json
+under the project root and a hash of the catalog files' contents as they were
+parsed, and lapses when a file changes. Stdio commands still need
+.BR \-\-trust .
 .TP
 .B \-\-json
 Machine-readable output for
-.BR list ", " doctor " and " measure .
+.BR list ", " doctor ", " measure ", " agents " and " "profile list" .
 .TP
 .BR \-y ", " \-\-last
-Skip the picker and reuse the saved selection.
+Skip the picker and reuse the saved selection. When none was saved, a warning
+says the agent will load no servers.
 .TP
 .B \-\-all
-Select every server and skip the picker.
+Select every server (never a hidden one) and skip the picker.
 .TP
 .B \-\-none
 Select nothing and skip the picker.
+.TP
+.BR \-h ", " \-\-help
+Print the usage text.
+.TP
+.BR \-V ", " \-\-version
+Print the version.
 .SH KEYS
 In the picker:
 .BR \[u2191]\[u2193] / jk
 move,
+.BR g / G
+first and last,
+.BR PgUp / PgDn
+a page (the list scrolls with the cursor; see
+.I config.yaml
+below),
 .B space
-toggles (checking a server disabled in Claude Code re-enables it there at launch),
+toggles (for claude, checking a server disabled in Claude Code re-enables it there at launch),
 .B /
-filters,
+filters the list as you type,
 .B m
-measures,
+measures every server in view (hidden ones only while their section is
+unfolded; a stdio server's command runs only once trusted, the row says
+\fBrun?\fR, and a second
+.B m
+on its row shows the command whole and asks; a remote server of the
+repository's catalog that would send something of yours says \fBask\fR and
+waits for a tick or \fBT\fR),
+.B M
+reviews every command not yet trusted and asks for all; on the screen
+.B y
+runs and trusts what is shown,
+.B T
+trusts the repository's catalog as a whole (it lists the file(s) and every
+remote server the trust covers; on a trusted catalog it offers to untrust
+it),
 .B a
 and
 .B n
-select all and none,
+select all (never a hidden server) and none,
+.B h
+hides or unhides the server under the cursor,
+.B H
+unfolds or folds the Hidden section,
+.B p
+manages profiles (a screen of its own: \fB+\fR add, \fBc\fR copy, \fBr\fR rename,
+\fBd\fR delete, \fBJ\fR/\fBK\fR move, \fBspace\fR toggle a server, \fBl\fR load,
+\fBenter\fR launch, \fBesc\fR back);
 .B s
 and
 .B l
-save and load a profile,
+save and load one,
 .B +
 adds a server,
 .B d
 deletes one,
+.B v
+moves one to another group (\fBp\fR project, \fBl\fR local, \fBu\fR user;
+plugins are read-only),
 .B enter
 launches,
 .B q
-aborts.
+aborts. The key line under the list wraps over up to three lines; on a
+terminal narrower than that it shows only the keys that fit. Every key works
+whether or not it is shown.
 .SH FILES
 .TP
 .I <root>/.mcp.yaml
@@ -170,11 +293,29 @@ The catalog. Also read:
 mcpick's home, mode 0700; see \fB\-\-home\fR. It holds:
 .RS
 .TP
+.I config.yaml
+The user's defaults for the picker, optional and never written by mcpick:
+.B max_rows
+(default 10) is how many server rows are in view at once; the rest scroll.
+An unknown key is ignored; a value that cannot be used is reported and the
+default kept.
+.TP
+.I profiles.yaml
+Your profiles: named selections, valid in every project.
+.TP
 .I selections/<workspace>-<hash>/<uid>.json
-The saved selection: server names only.
+The saved selection: each checked server's name, origin and a hash of its
+spec as written, never a value.
 .TP
 .I state/
-OAuth tokens, measured context costs, and records for restoring project files.
+OAuth tokens, measured context costs, the commands trusted for measuring
+(\fItrust.json\fR: project, server name, a hash of command, arguments and
+environment as written \(em never a value), the project catalogs trusted
+(project and a hash of the catalog files' contents), and records for
+restoring project files.
+.TP
+.I state/hidden/<workspace>-<hash>.json
+The servers hidden with \fBh\fR, per workspace.
 .TP
 .I run/
 Rendered configs and overlays. They contain expanded secrets, are mode 0600, and
@@ -182,7 +323,7 @@ are removed once the process that owns them has ended.
 .RE
 .TP
 .I ~/.claude.json
-Read for project- and global-scope servers.
+Read for local- and user-scope servers.
 .TP
 .I ~/.claude/plugins/
 Enabled plugins' servers are read so the selection can keep them;
@@ -214,7 +355,7 @@ Located for the agents configured through it (Muse, opencode).
 Success.
 .TP
 .B 1
-An error, or an unreachable server under
+An error, or an unreachable or skipped server under
 .BR doctor .
 .TP
 .B 128+n

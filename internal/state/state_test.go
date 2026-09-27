@@ -89,9 +89,7 @@ func TestLegacySelectionsAreRead(t *testing.T) {
 		name string
 		path func(root string) string
 	}{
-		{"0.1.0 .tmp", func(root string) string { return filepath.Join(root, ".tmp", "mcpick-box.json") }},
-		{"prototype .scratchpad", func(root string) string { return filepath.Join(root, ".scratchpad", "mcpick", "box.json") }},
-		{"xdg state", func(root string) string { return legacyPaths(root, "box")[2] }},
+		{"xdg state", func(root string) string { return legacyPaths(root, "box")[0] }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			testHome(t)
@@ -117,6 +115,21 @@ func TestLegacySelectionsAreRead(t *testing.T) {
 				t.Error("the legacy file must never be written")
 			}
 		})
+	}
+}
+
+// The prototype's `<root>/.scratchpad/mcpick/<uid>.json` predates 0.1.0 and
+// is no longer read: a file there is the project's own business.
+func TestPrototypeSelectionIsNotRead(t *testing.T) {
+	testHome(t)
+	root := t.TempDir()
+	write(t, filepath.Join(root, ".scratchpad", "mcpick", "box.json"), `{"selected":["old"]}`)
+	got, err := Load(root, "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Selected) != 0 {
+		t.Errorf("state = %+v, want the prototype's file ignored", got)
 	}
 }
 
@@ -154,5 +167,37 @@ func TestCorruptSelectionIsEmpty(t *testing.T) {
 	got, err := Load(root, "box")
 	if err != nil || len(got.Selected) != 0 {
 		t.Errorf("got %+v, %v; a corrupt selection should read as empty, not fail the launch", got, err)
+	}
+}
+
+// A selection file inside the repository is the repository's, not the
+// user's: a forged `<root>/.tmp/mcpick-<uid>.json` with checks recorded for
+// a server it defines must neither pre-check that server nor vouch for it.
+func TestInRepoSelectionIsIgnored(t *testing.T) {
+	testHome(t)
+	root := t.TempDir()
+	write(t, filepath.Join(root, ".tmp", "mcpick-box.json"),
+		`{"selected":["helper"],"checks":{"helper":{"origin":"project","spec":"b5a784534e705574c2f29294d7ab7c4108d962365fde2a935a3fba633487c81d"}}}`)
+	got, err := Load(root, "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Selected) != 0 || len(got.Checks) != 0 {
+		t.Errorf("a selection forged inside the repository was read: %+v", got)
+	}
+}
+
+// A legacy file outside the repository still gives its names, but never
+// checks: no build that wrote one recorded them.
+func TestLegacySelectionDropsChecks(t *testing.T) {
+	testHome(t)
+	root := t.TempDir()
+	write(t, legacyPaths(root, "box")[0], `{"selected":["old"],"checks":{"old":{"origin":"project","spec":"x"}}}`)
+	got, err := Load(root, "box")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Selected) != 1 || got.Checks != nil {
+		t.Errorf("legacy selection = %+v; want the names and no checks", got)
 	}
 }

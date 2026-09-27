@@ -13,11 +13,25 @@ import (
 
 type State struct {
 	Selected []string `json:"selected"`
-	Updated  string   `json:"updated"`
-	Target   string   `json:"target,omitempty"`
+	// Checks records, for each selected server, what was checked: where it
+	// came from and a fingerprint of its spec as written
+	// (trust.SpecFingerprint). A name alone is not enough for a server the
+	// repository's catalog defines: another server can take the name, or
+	// the same server can change its URL or headers, and the check must
+	// not carry over (trust.Confirm). A selection saved before checks were
+	// recorded has none, and its workspace servers are unconfirmed.
+	Checks  map[string]Check `json:"checks,omitempty"`
+	Updated string           `json:"updated"`
+	Target  string           `json:"target,omitempty"`
 	// Workspace records which directory the selection belongs to, so a
 	// person reading ~/.mcpick/selections can tell without the hash.
 	Workspace string `json:"workspace,omitempty"`
+}
+
+// Check is what one checked server was when it was checked.
+type Check struct {
+	Origin string `json:"origin"`
+	Spec   string `json:"spec"`
 }
 
 // Dir is the directory holding one workspace's selections:
@@ -36,25 +50,28 @@ func Path(root, uid string) string {
 	return filepath.Join(Dir(root), fsutil.Sanitize(uid)+".json")
 }
 
-// legacyPaths are where earlier versions kept the selection. They are read
-// when the current path has nothing yet, and the next save lands in the new
-// place, so upgrading loses no selection. They are never written or removed.
+// legacyPaths are where earlier builds kept the selection outside
+// ~/.mcpick. They are read when the current path has nothing yet, and the
+// next save lands in the new place, so upgrading loses no selection. They
+// are never written or removed. None of them is inside the workspace: a
+// file there belongs to whoever wrote the repository, and a selection read
+// from it would pre-check whatever the repository chose. (The released
+// 0.1.0 already wrote to ~/.mcpick/selections; `<root>/.tmp/` was a
+// pre-release default.)
 func legacyPaths(root, uid string) []string {
-	u := fsutil.Sanitize(uid)
-	paths := []string{
-		filepath.Join(root, ".tmp", "mcpick-"+u+".json"),        // 0.1.0 default
-		filepath.Join(root, ".scratchpad", "mcpick", u+".json"), // the prototype
-	}
 	xdg := os.Getenv("XDG_STATE_HOME")
 	if xdg == "" {
 		xdg = fsutil.Home(".local", "state")
 	}
-	return append(paths, filepath.Join(xdg, "mcpick", fsutil.ShortHash(root)+"-"+u+".json"))
+	return []string{filepath.Join(xdg, "mcpick", fsutil.ShortHash(root)+"-"+fsutil.Sanitize(uid)+".json")}
 }
 
-// Load returns the saved selection, or an empty one.
+// Load returns the saved selection, or an empty one. A legacy file gives
+// its names only: no build that wrote one recorded checks, so checks found
+// there were not written by mcpick and are dropped.
 func Load(root, uid string) (State, error) {
-	for _, p := range append([]string{Path(root, uid)}, legacyPaths(root, uid)...) {
+	current := Path(root, uid)
+	for _, p := range append([]string{current}, legacyPaths(root, uid)...) {
 		data, err := os.ReadFile(p)
 		if os.IsNotExist(err) {
 			continue
@@ -65,6 +82,9 @@ func Load(root, uid string) (State, error) {
 		var st State
 		if json.Unmarshal(data, &st) != nil {
 			return State{}, nil // a corrupt selection is not worth failing a launch
+		}
+		if p != current {
+			st.Checks = nil
 		}
 		return st, nil
 	}

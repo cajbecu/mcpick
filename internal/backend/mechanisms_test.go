@@ -1,4 +1,4 @@
-package target
+package backend
 
 import (
 	"encoding/json"
@@ -41,7 +41,7 @@ func remoteSel() spec.Selection {
 	return oneSel("srv", map[string]any{"type": "http", "url": "https://example.com/mcp"})
 }
 
-func TestPickTargetFromCommandName(t *testing.T) {
+func TestPickBackendFromCommandName(t *testing.T) {
 	for _, tc := range []struct{ argv0, want string }{
 		{"claude", "claude"},
 		{"/usr/local/bin/codex", "codex"},
@@ -59,15 +59,15 @@ func TestPickTargetFromCommandName(t *testing.T) {
 	}
 }
 
-func TestPickTargetExplicitUnknown(t *testing.T) {
+func TestPickBackendExplicitUnknown(t *testing.T) {
 	if _, err := Pick("nope", []string{"claude"}); err == nil {
-		t.Fatal("an unknown --target must be an error, not a silent fallback")
+		t.Fatal("an unknown --agent must be an error, not a silent fallback")
 	}
 }
 
 func TestClaudePlanInjectsFlags(t *testing.T) {
 	ctx := testCtx(t)
-	plan, err := claudeTarget{}.Plan(ctx, remoteSel(), []string{"claude", "--dangerously-skip-permissions"})
+	plan, err := claudeBackend{}.Plan(ctx, remoteSel(), []string{"claude", "--dangerously-skip-permissions"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +87,7 @@ func TestClaudePlanInjectsFlags(t *testing.T) {
 // subcommand changes what runs.
 func TestClaudePlanSkipsSubcommands(t *testing.T) {
 	ctx := testCtx(t)
-	plan, err := claudeTarget{}.Plan(ctx, remoteSel(), []string{"claude", "mcp", "list"})
+	plan, err := claudeBackend{}.Plan(ctx, remoteSel(), []string{"claude", "mcp", "list"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +101,7 @@ func TestClaudePlanSkipsSubcommands(t *testing.T) {
 
 func TestRenderedConfigIsPrivate(t *testing.T) {
 	ctx := testCtx(t)
-	plan, err := claudeTarget{}.Plan(ctx, remoteSel(), []string{"claude"})
+	plan, err := claudeBackend{}.Plan(ctx, remoteSel(), []string{"claude"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,13 +198,13 @@ func TestOverlayNestedPath(t *testing.T) {
 	}
 }
 
-func TestHomeTargetPlanMergesRealConfig(t *testing.T) {
+func TestOverlayBackendPlanMergesRealConfig(t *testing.T) {
 	src := t.TempDir()
 	if err := os.WriteFile(filepath.Join(src, "config.toml"),
 		[]byte("model = \"gpt-5\"\n\n[mcp_servers.stale]\ncommand = \"old\"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h := homeTarget{Meta: Meta{Name: "codex"}, env: "CODEX_HOME", src: src, rel: "config.toml", toml: true, emitFn: spec.EmitCodex}
+	h := overlayBackend{Meta: Meta{Name: "codex"}, env: "CODEX_HOME", dir: func() string { return src }, file: "config.toml", toml: true, dialect: spec.TOML{Agent: "codex", Headers: "http_headers"}}
 
 	ctx := testCtx(t)
 	plan, err := h.Plan(ctx, remoteSel(), []string{"codex"})
@@ -240,12 +240,12 @@ func TestHomeTargetPlanMergesRealConfig(t *testing.T) {
 	}
 }
 
-func TestProjectTargetRewritesAndRestores(t *testing.T) {
+func TestProjectBackendRewritesAndRestores(t *testing.T) {
 	ctx := testCtx(t)
 	path := filepath.Join(ctx.Root, ".gemini", "settings.json")
 	write(t, path, `{"theme":"dark","mcpServers":{"old":{"httpUrl":"https://x/old"}}}`)
 
-	p := projectTarget{Meta: Meta{Name: "gemini"}, rel: ".gemini/settings.json", topKey: "mcpServers", emitFn: spec.EmitGemini}
+	p := projectBackend{Meta: Meta{Name: "gemini"}, file: ".gemini/settings.json", topKey: "mcpServers", dialect: spec.JSON{Agent: "gemini", TopKey: "mcpServers"}}
 	plan, err := p.Plan(ctx, remoteSel(), []string{"gemini"})
 	if err != nil {
 		t.Fatal(err)
@@ -272,9 +272,9 @@ func TestProjectTargetRewritesAndRestores(t *testing.T) {
 	}
 }
 
-func TestProjectTargetRemovesFileItCreated(t *testing.T) {
+func TestProjectBackendRemovesFileItCreated(t *testing.T) {
 	ctx := testCtx(t)
-	p := projectTarget{Meta: Meta{Name: "devin"}, rel: ".devin/config.json", topKey: "mcpServers", emitFn: spec.EmitClaude}
+	p := projectBackend{Meta: Meta{Name: "devin"}, file: ".devin/config.json", topKey: "mcpServers", dialect: spec.Claude}
 	plan, err := p.Plan(ctx, remoteSel(), []string{"devin"})
 	if err != nil {
 		t.Fatal(err)
@@ -294,9 +294,9 @@ func TestProjectTargetRemovesFileItCreated(t *testing.T) {
 
 func TestGeminiPlanPassesAllowList(t *testing.T) {
 	ctx := testCtx(t)
-	var gemini projectTarget
+	var gemini projectBackend
 	for _, tgt := range All() {
-		if p, ok := tgt.(projectTarget); ok && p.Name == "gemini" {
+		if p, ok := tgt.(projectBackend); ok && p.Name == "gemini" {
 			gemini = p
 		}
 	}
@@ -314,22 +314,14 @@ func TestGeminiPlanPassesAllowList(t *testing.T) {
 	}
 }
 
-func TestGenericTargetLeavesCommandAlone(t *testing.T) {
+func TestGenericBackendLeavesCommandAlone(t *testing.T) {
 	ctx := testCtx(t)
-	plan, err := genericTarget{}.Plan(ctx, remoteSel(), []string{"whatever", "--flag"})
+	plan, err := genericBackend{}.Plan(ctx, remoteSel(), []string{"whatever", "--flag"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(plan.Argv) != 2 || plan.Argv[1] != "--flag" {
 		t.Errorf("argv = %v, want it untouched", plan.Argv)
-	}
-}
-
-func TestEveryTargetHasASummary(t *testing.T) {
-	for _, tgt := range All() {
-		if tgt.Info().Summary == "" {
-			t.Errorf("%q has no summary", tgt.Info().Name)
-		}
 	}
 }
 
@@ -352,7 +344,7 @@ func TestOverlaySyncsBackReplacedAndNewFiles(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "auth.json"), `{"token":"old"}`)
 	write(t, filepath.Join(src, "config.toml"), "model = \"a\"\n")
-	h := homeTarget{Meta: Meta{Name: "codex"}, env: "CODEX_HOME", src: src, rel: "config.toml", toml: true, emitFn: spec.EmitCodex}
+	h := overlayBackend{Meta: Meta{Name: "codex"}, env: "CODEX_HOME", dir: func() string { return src }, file: "config.toml", toml: true, dialect: spec.TOML{Agent: "codex", Headers: "http_headers"}}
 
 	plan, err := h.Plan(testCtx(t), remoteSel(), []string{"codex"})
 	if err != nil {
@@ -389,7 +381,7 @@ func TestOverlaySyncsBackReplacedAndNewFiles(t *testing.T) {
 func TestOverlayKeepsAgentEditsToConfig(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "config.toml"), "model = \"a\"\n\n[mcp_servers.mine]\ncommand = \"m\"\n")
-	h := homeTarget{Meta: Meta{Name: "codex"}, env: "CODEX_HOME", src: src, rel: "config.toml", toml: true, emitFn: spec.EmitCodex}
+	h := overlayBackend{Meta: Meta{Name: "codex"}, env: "CODEX_HOME", dir: func() string { return src }, file: "config.toml", toml: true, dialect: spec.TOML{Agent: "codex", Headers: "http_headers"}}
 
 	plan, err := h.Plan(testCtx(t), remoteSel(), []string{"codex"})
 	if err != nil {
@@ -414,9 +406,9 @@ func TestOverlayKeepsAgentEditsToConfig(t *testing.T) {
 
 // Two sessions rewriting the same project file would each restore the other's
 // generated config as "the original".
-func TestProjectTargetRefusesConcurrentSession(t *testing.T) {
+func TestProjectBackendRefusesConcurrentSession(t *testing.T) {
 	ctx := testCtx(t)
-	p := projectTarget{Meta: Meta{Name: "gemini"}, rel: ".gemini/settings.json", topKey: "mcpServers", emitFn: spec.EmitGemini}
+	p := projectBackend{Meta: Meta{Name: "gemini"}, file: ".gemini/settings.json", topKey: "mcpServers", dialect: spec.JSON{Agent: "gemini", TopKey: "mcpServers"}}
 	first, err := p.Plan(ctx, remoteSel(), []string{"gemini"})
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +430,7 @@ func TestRecoverStaleRestoresAfterCrash(t *testing.T) {
 	ctx.PID = deadPID(t)
 	path := filepath.Join(ctx.Root, ".gemini", "settings.json")
 	write(t, path, `{"theme":"dark"}`)
-	p := projectTarget{Meta: Meta{Name: "gemini"}, rel: ".gemini/settings.json", topKey: "mcpServers", emitFn: spec.EmitGemini}
+	p := projectBackend{Meta: Meta{Name: "gemini"}, file: ".gemini/settings.json", topKey: "mcpServers", dialect: spec.JSON{Agent: "gemini", TopKey: "mcpServers"}}
 	if _, err := p.Plan(ctx, remoteSel(), []string{"gemini"}); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +490,7 @@ func TestProjectRestoreKeepsEditsMadeDuringRun(t *testing.T) {
 	ctx := testCtx(t)
 	path := filepath.Join(ctx.Root, ".gemini", "settings.json")
 	write(t, path, `{"theme":"dark","mcpServers":{"mine":{"httpUrl":"https://x/mine"}}}`)
-	p := projectTarget{Meta: Meta{Name: "gemini"}, rel: ".gemini/settings.json", topKey: "mcpServers", emitFn: spec.EmitGemini}
+	p := projectBackend{Meta: Meta{Name: "gemini"}, file: ".gemini/settings.json", topKey: "mcpServers", dialect: spec.JSON{Agent: "gemini", TopKey: "mcpServers"}}
 	plan, err := p.Plan(ctx, remoteSel(), []string{"gemini"})
 	if err != nil {
 		t.Fatal(err)
@@ -524,6 +516,34 @@ func TestLeaksReportsServersTheAgentLoadsAnyway(t *testing.T) {
 	}
 }
 
+// `mcpick agents` shows where an agent also reads servers from as paths a
+// reader can type, not as the templates they are stored as.
+func TestDisplayPathShowsPathsNotTemplates(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		t.Skip("no home directory")
+	}
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "cfg"))
+	for in, want := range map[string]string{
+		"{root}/.mcp.json":        "./.mcp.json",
+		"{root}/.cursor/mcp.json": "./.cursor/mcp.json",
+		"{home}/.claude.json":     "~/.claude.json",
+		"{xdg}/mcp/mcp.json":      "~/cfg/mcp/mcp.json",
+	} {
+		if got := DisplayPath(in); got != want {
+			t.Errorf("DisplayPath(%q) = %q, want %q", in, got, want)
+		}
+	}
+	elsewhere := t.TempDir()
+	if strings.HasPrefix(elsewhere, home+string(filepath.Separator)) {
+		return
+	}
+	t.Setenv("XDG_CONFIG_HOME", elsewhere)
+	if got, want := DisplayPath("{xdg}/mcp/mcp.json"), filepath.ToSlash(elsewhere)+"/mcp/mcp.json"; got != want {
+		t.Errorf("DisplayPath outside home = %q, want %q", got, want)
+	}
+}
+
 // deadPID returns a pid that is certainly not running: a child that has
 // already been reaped.
 func deadPID(t *testing.T) int {
@@ -542,7 +562,7 @@ func TestHalfWrittenRecordIsALiveClaim(t *testing.T) {
 	path := filepath.Join(ctx.Root, ".gemini", "settings.json")
 	meta, _ := recordPaths(ctx.State, path)
 	write(t, meta, "")
-	p := projectTarget{Meta: Meta{Name: "gemini"}, rel: ".gemini/settings.json", topKey: "mcpServers", emitFn: spec.EmitGemini}
+	p := projectBackend{Meta: Meta{Name: "gemini"}, file: ".gemini/settings.json", topKey: "mcpServers", dialect: spec.JSON{Agent: "gemini", TopKey: "mcpServers"}}
 	if _, err := p.Plan(ctx, remoteSel(), []string{"gemini"}); err == nil {
 		t.Fatal("a fresh, half-written record must be treated as someone else's claim")
 	}
@@ -565,21 +585,31 @@ func jsonStr(s string) string {
 // 0777 whatever was asked for; access there is governed by per-user ACLs.
 var unixPerms = runtime.GOOS != "windows"
 
-// Every agent mcpick supports is recognisable in the picker, and the preview
-// never touches the disk.
-func TestEveryTargetHasABadgeAndAPreview(t *testing.T) {
-	ctxRoot := t.TempDir()
-	for _, tgt := range All() {
-		in := tgt.Info()
-		if in.Glyph == "" || in.Color == "" {
-			t.Errorf("%s has no glyph or colour", in.Name)
-		}
-		pv := tgt.Preview(remoteSel(), []string{in.Name, "--flag"})
-		if len(pv.Argv) == 0 || pv.Argv[len(pv.Argv)-1] != "--flag" {
-			t.Errorf("%s preview lost the user's arguments: %v", in.Name, pv.Argv)
-		}
+// A scalar beside the server map — opencode.json's "$schema" — used to
+// fail the decode of the whole file, and the servers the agent loads
+// anyway went unreported.
+func TestLeaksSeesPastScalarTopLevelKeys(t *testing.T) {
+	root := t.TempDir()
+	write(t, filepath.Join(root, "opencode.json"), `{"$schema": "https://opencode.ai/config.json", "theme": "dark", "mcp": {"srv": {}, "extra": {"type": "local"}}}`)
+	in := byName["opencode"].Info()
+	got := Leaks(in, root, remoteSel())
+	if len(got) != 1 || !strings.Contains(got[0], "extra") || strings.Contains(got[0], "srv,") {
+		t.Errorf("leaks = %v, want one note naming extra only", got)
 	}
-	if entries, _ := os.ReadDir(ctxRoot); len(entries) != 0 {
-		t.Error("a preview wrote to disk")
+}
+
+// A command mcpick has no adapter for runs unchanged; the note says so and
+// how to name the agent it wraps.
+func TestGenericSaysHowToNameTheAgent(t *testing.T) {
+	plan, err := generic.Plan(testCtx(t), remoteSel(), []string{"/opt/bin/myagent", "--flag"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "myagent is not an agent mcpick knows; running it unchanged with MCPICK_CONFIG set. If it wraps one, use --agent NAME (mcpick agents lists them)."
+	if len(plan.Notes) != 1 || plan.Notes[0] != want {
+		t.Errorf("notes = %q\n    want %q", plan.Notes, want)
+	}
+	if strings.Join(plan.Argv, " ") != "/opt/bin/myagent --flag" {
+		t.Errorf("argv = %v; the command must not change", plan.Argv)
 	}
 }

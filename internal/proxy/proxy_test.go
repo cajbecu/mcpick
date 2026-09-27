@@ -100,6 +100,52 @@ func call(t *testing.T, p *Proxy, method string, params any) mcp.RPCResponse {
 	return *resp
 }
 
+// Two upstreams whose exposed names coincide — the sanitiser writes `a.b`
+// and `a_b` the same way — would put one name twice in the list, which
+// clients reject whole. The first server in the selection keeps the name,
+// the other tool is left out, calls reach the first, and the collision is
+// said once, not on every tools/list.
+func TestProxyKeepsTheFirstOfCollidingToolNames(t *testing.T) {
+	a := fakeServer(t, "a.b", []string{"t", "only-here"}, false)
+	b := fakeServer(t, "a_b", []string{"t"}, false)
+	p := New(spec.Selection{Names: []string{"a.b", "a_b"}, Specs: map[string]map[string]any{
+		"a.b": {"type": "http", "url": a.URL},
+		"a_b": {"type": "http", "url": b.URL},
+	}}, 5*time.Second)
+	t.Cleanup(p.Close)
+	var warnings []string
+	orig := warnf
+	warnf = func(format string, args ...any) { warnings = append(warnings, fmt.Sprintf(format, args...)) }
+	t.Cleanup(func() { warnf = orig })
+
+	for range 2 {
+		resp := call(t, p, "tools/list", map[string]any{})
+		if resp.Error != nil {
+			t.Fatal(resp.Error)
+		}
+		var out struct {
+			Tools []mcp.Tool `json:"tools"`
+		}
+		if err := json.Unmarshal(resp.Result, &out); err != nil {
+			t.Fatal(err)
+		}
+		var names []string
+		for _, tool := range out.Tools {
+			names = append(names, tool.Name)
+		}
+		if got := strings.Join(names, ","); got != "a_b__t,a_b__only-here" {
+			t.Errorf("tools = %s, want the first server's t and its other tool", got)
+		}
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "a_b__t: a_b/t hidden by a.b/t") {
+		t.Errorf("warnings = %q, want one naming both tools", warnings)
+	}
+	resp := call(t, p, "tools/call", map[string]any{"name": "a_b__t"})
+	if resp.Error != nil || !strings.Contains(string(resp.Result), "a.b") {
+		t.Errorf("call = %v %s, want it answered by a.b", resp.Error, resp.Result)
+	}
+}
+
 func TestProxyAggregatesAndNamespacesTools(t *testing.T) {
 	p := proxyFor(t)
 	resp := call(t, p, "tools/list", map[string]any{})
@@ -333,3 +379,71 @@ func TestDeadUpstreamIsRetried(t *testing.T) {
 }
 
 const allowedToolRunes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+
+// A JSON-RPC error from serve carries the upstream's failure; the URL in it
+// is redacted, so a client never sees the expanded query values.
+func TestJSONRPCErrorRedactsUpstreamURL(t *testing.T) {
+	p := New(spec.Selection{Names: []string{"dead"}, Specs: map[string]map[string]any{
+		"dead": {"type": "http", "url": "http://127.0.0.1:1/mcp?api_key=live-key-value"},
+	}}, time.Second)
+	defer p.Close()
+	resp := call(t, p, "tools/call", map[string]any{"name": "dead__x", "arguments": map[string]any{}})
+	if resp.Error == nil {
+		t.Fatal("a dead upstream must fail the call")
+	}
+	if strings.Contains(resp.Error.Message, "live-key-value") {
+		t.Errorf("the JSON-RPC error carries the query value: %q", resp.Error.Message)
+	}
+	if !strings.Contains(resp.Error.Message, "api_key=***") {
+		t.Errorf("the URL should be shown redacted: %q", resp.Error.Message)
+	}
+}
+
+// The URL in an upstream's error is the one the catalog wrote, `${TOK}`
+// and all, as in the picker and measure: expanded, the secret is in the
+// path, where query redaction does not reach. And a value an upstream
+// echoes back — here the Authorization header it was sent — is put back
+// as its reference before the client sees it.
+func TestJSONRPCErrorShowsTheSpecAsWritten(t *testing.T) {
+	t.Setenv("MCPICK_TEST_TOK", "SECRETVALUE42")
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "invalid credential %s", r.Header.Get("Authorization"))
+	}))
+	defer echo.Close()
+	raw := map[string]map[string]any{
+		"dead": {"type": "http", "url": "http://127.0.0.1:1/${MCPICK_TEST_TOK}/mcp"},
+		"echo": {"type": "http", "url": echo.URL + "/mcp", "headers": map[string]any{"Authorization": "Bearer ${MCPICK_TEST_TOK}"}},
+	}
+	specs := map[string]map[string]any{}
+	for n, sp := range raw {
+		e, err := spec.Expand(sp, "u")
+		if err != nil {
+			t.Fatal(err)
+		}
+		specs[n] = e.(map[string]any)
+	}
+	p := New(spec.Selection{Names: []string{"dead", "echo"}, Specs: specs, Raw: raw}, time.Second)
+	defer p.Close()
+	for _, name := range []string{"dead", "echo"} {
+		resp := call(t, p, "tools/call", map[string]any{"name": name + "__x", "arguments": map[string]any{}})
+		if resp.Error == nil {
+			t.Fatalf("%s: the call must fail", name)
+		}
+		if strings.Contains(resp.Error.Message, "SECRETVALUE42") || !strings.Contains(resp.Error.Message, "${MCPICK_TEST_TOK}") {
+			t.Errorf("%s: error = %q; want the reference, not the value", name, resp.Error.Message)
+		}
+	}
+}
+
+// serve writes its JSON with C1 controls and format characters escaped,
+// like --json: a tool description is the upstream's text.
+func TestServeOutputEscapesTerminalCharacters(t *testing.T) {
+	var out strings.Builder
+	if err := (safeEncoder{&out}).Encode(map[string]string{"description": "a\u009b2J\u202eb"}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.ContainsAny(out.String(), "\u009b\u202e") || !strings.Contains(out.String(), `\u009b2J\u202eb`) {
+		t.Errorf("serve wrote %q", out.String())
+	}
+}

@@ -20,21 +20,21 @@ func authOf(sel spec.Selection, name string) any {
 
 func TestClaudeTokenLent(t *testing.T) {
 	now := time.Now()
-	tokens := []claudeToken{{ServerName: "freshdesk", ServerURL: "https://x/fd", AccessToken: "tok", ExpiresAt: now.Add(time.Hour).UnixMilli()}}
-	sel := remote("freshdesk", "https://x/fd")
-	notes := attachClaude(sel, map[string]string{"freshdesk": "freshdesk"}, tokens, now)
-	if authOf(sel, "freshdesk") != "Bearer tok" || notes["freshdesk"] != AuthClaude {
-		t.Errorf("auth = %v, note = %q", authOf(sel, "freshdesk"), notes["freshdesk"])
+	tokens := []claudeToken{{ServerName: "sentry", ServerURL: "https://x/sentry", AccessToken: "tok", ExpiresAt: now.Add(time.Hour).UnixMilli()}}
+	sel := remote("sentry", "https://x/sentry")
+	notes := attachClaude(sel, map[string]string{"sentry": "sentry"}, tokens, now)
+	if authOf(sel, "sentry") != "Bearer tok" || notes["sentry"] != AuthClaude {
+		t.Errorf("auth = %v, note = %q", authOf(sel, "sentry"), notes["sentry"])
 	}
 }
 
 // A token goes only to the host it was issued for: a catalog entry pointing
 // the same name at another URL must not receive it.
 func TestClaudeTokenNeedsMatchingURL(t *testing.T) {
-	tokens := []claudeToken{{ServerName: "freshdesk", ServerURL: "https://x/fd", AccessToken: "tok"}}
-	sel := remote("freshdesk", "https://evil.example/fd")
-	attachClaude(sel, map[string]string{"freshdesk": "freshdesk"}, tokens, time.Now())
-	if authOf(sel, "freshdesk") != nil {
+	tokens := []claudeToken{{ServerName: "sentry", ServerURL: "https://x/sentry", AccessToken: "tok"}}
+	sel := remote("sentry", "https://evil.example/sentry")
+	attachClaude(sel, map[string]string{"sentry": "sentry"}, tokens, time.Now())
+	if authOf(sel, "sentry") != nil {
 		t.Fatal("a token was sent to a URL it was not issued for")
 	}
 }

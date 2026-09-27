@@ -1,8 +1,11 @@
 version: 2
 
-before:
-  hooks:
-    - go mod tidy
+# Named here rather than taken from the git remote, so a fork or a local
+# clone builds the same archive names as the release.
+project_name: mcpick
+
+# No `go mod tidy` hook: it would edit the tree at release time, and CI
+# already fails a pull request whose go.mod is not tidy.
 
 builds:
   - env:
@@ -30,6 +33,7 @@ archives:
       - README.md
       - LICENSE
       - CHANGELOG.md
+      - SECURITY.md
       - man/mcpick.1
       - completions/*
       - docs/*
@@ -52,11 +56,20 @@ nfpms:
         dst: /usr/share/zsh/site-functions/_mcpick
       - src: completions/mcpick.fish
         dst: /usr/share/fish/vendor_completions.d/mcpick.fish
+      # Plain files, not `type: doc`: nfpm marks a doc file for the rpm
+      # only and leaves it out of the deb and the apk.
+      - src: LICENSE
+        dst: /usr/share/doc/mcpick/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/mcpick/README.md
+      - src: SECURITY.md
+        dst: /usr/share/doc/mcpick/SECURITY.md
 
 # Homebrew. Casks are GoReleaser's current Homebrew format (formulas are
 # deprecated there). The cask lives in a separate tap repository and is pushed
-# with a token that can write to it; without the token the upload is skipped,
-# so a release never fails for want of it.
+# with a token that can write to it; without the token — unset or empty —
+# the upload is skipped, so a release or a local snapshot never fails for
+# want of it.
 homebrew_casks:
   - name: mcpick
     homepage: https://github.com/cajbecu/mcpick
@@ -71,8 +84,8 @@ homebrew_casks:
     repository:
       owner: cajbecu
       name: homebrew-tap
-      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
-    skip_upload: '{{ if eq .Env.HOMEBREW_TAP_TOKEN "" }}true{{ end }}'
+      token: '{{ envOrDefault "HOMEBREW_TAP_TOKEN" "" }}'
+    skip_upload: '{{ if not (isEnvSet "HOMEBREW_TAP_TOKEN") }}true{{ end }}'
     commit_msg_template: "mcpick {{ .Tag }}"
     # The binary is not signed with an Apple Developer ID, so Gatekeeper
     # would call it damaged. Removing the quarantine flag after install is the
@@ -96,10 +109,11 @@ changelog:
       - "^docs:"
       - "^test:"
       - "^chore:"
+      - "^Merge branch"
 
 # Local and CI dry runs name their build after `git describe`, like every
-# other non-release build: 0.1.0-dirty, 0.1.0-3-gabc1234. The default,
-# 0.1.0-SNAPSHOT-<commit>, reads as if it were exactly that commit even when
+# other non-release build: 0.2.0-dirty, 0.2.0-3-gabc1234. The default,
+# 0.2.0-SNAPSHOT-<commit>, reads as if it were exactly that commit even when
 # the tree has changed since.
 snapshot:
   version_template: '{{ trimprefix .Summary "v" }}'
@@ -133,8 +147,8 @@ release:
     `mcpick` on your `PATH`. The macOS archive is one universal binary for Intel
     and Apple Silicon.
 
-    Check a download against `checksums.txt`, or, once the repository is public,
-    against its signed build provenance:
+    Check a download against `checksums.txt`, or against its signed build
+    provenance:
     ```sh
     gh attestation verify <file> -R cajbecu/mcpick
     ```

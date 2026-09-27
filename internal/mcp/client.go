@@ -15,12 +15,14 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/cajbecu/mcpick/internal/proc"
 	"github.com/cajbecu/mcpick/internal/spec"
+	"github.com/cajbecu/mcpick/internal/trust"
 )
 
 // ProtocolVersion is the revision mcpick asks for. Servers that speak a newer
@@ -74,13 +76,26 @@ type Conn interface {
 
 var httpClient = &http.Client{Timeout: 60 * time.Second}
 
+// streamClient carries the legacy SSE stream, which lives as long as the
+// connection and so cannot share the client-wide timeout.
+var streamClient = &http.Client{}
+
 // Dial opens a connection to one server: a child process for stdio, the legacy
 // two-endpoint SSE transport for type "sse", streamable HTTP otherwise.
+func Dial(ctx context.Context, v spec.View) (Conn, error) { return DialWith(ctx, v, Options{}) }
+
+// DialWith is Dial with Options. A PublicOnly connection goes through the
+// checking transport (see public.go); a stdio server has no address to
+// check and the option does not apply.
 //
 // The nil returns are spelled out on purpose. Returning a nil *stdioConn as an
 // Conn produces a non-nil interface, and a caller's `if conn != nil`
 // cleanup then dereferences it.
-func Dial(ctx context.Context, v spec.View) (Conn, error) {
+func DialWith(ctx context.Context, v spec.View, opt Options) (Conn, error) {
+	client, stream := httpClient, streamClient
+	if opt.PublicOnly {
+		client, stream = publicClients()
+	}
 	switch {
 	case !v.Remote():
 		c, err := newStdioConn(v)
@@ -89,14 +104,82 @@ func Dial(ctx context.Context, v spec.View) (Conn, error) {
 		}
 		return c, nil
 	case v.Transport == "sse":
-		c, err := newSSEConn(ctx, v)
+		c, err := newSSEConn(ctx, v, client, stream, opt.Written)
 		if err != nil {
 			return nil, err
 		}
 		return c, nil
 	default:
-		return newHTTPConn(v), nil
+		return newHTTPConn(v, client, opt.Written), nil
 	}
+}
+
+// redactErr rewrites a *url.Error in err's chain so the URL it carries shows
+// without its query values and userinfo password. The transports send the
+// expanded URL, so `?key=${K}` reaches the error text as the secret itself,
+// and that text goes to the terminal, --json, the picker's status line and
+// serve's JSON-RPC errors. written, when set, is the URL as the catalog
+// wrote it, placeholders and all, and stands in for the expanded one. Any
+// other error is returned as it is.
+func redactErr(err error, written string) error {
+	var ue *url.Error
+	if !errors.As(err, &ue) {
+		return err
+	}
+	u := ue.URL
+	if written != "" {
+		u = written
+	}
+	return &url.Error{Op: ue.Op, URL: redactURL(u), Err: ue.Err}
+}
+
+// urlUserinfo matches scheme://user:password@ at the start of a URL.
+var urlUserinfo = regexp.MustCompile(`^([a-zA-Z][a-zA-Z0-9+.-]*://[^/?#@:]*):([^/?#@]*)@`)
+
+// redactURL hides what a URL carries that could be a credential: the
+// password in its userinfo and the value of every query and fragment
+// parameter, each replaced by ***. A value that is still a `${VAR}`
+// placeholder (a URL as written) is kept: it is a name, not a secret. Text
+// rather than url.Parse, so a URL Go refuses to parse is redacted too.
+func redactURL(s string) string {
+	s = urlUserinfo.ReplaceAllStringFunc(s, func(m string) string {
+		g := urlUserinfo.FindStringSubmatch(m)
+		if strings.HasPrefix(g[2], "${") {
+			return m
+		}
+		return g[1] + ":***@"
+	})
+	i := strings.IndexAny(s, "?#")
+	if i < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.WriteString(s[:i])
+	rest := s[i:]
+	for rest != "" {
+		// Each parameter ends at the next separator; the separator that
+		// began it is kept.
+		sep := rest[:1]
+		rest = rest[1:]
+		end := strings.IndexAny(rest, "&#")
+		if end < 0 {
+			end = len(rest)
+		}
+		param := rest[:end]
+		rest = rest[end:]
+		b.WriteString(sep)
+		name, val, has := strings.Cut(param, "=")
+		b.WriteString(name)
+		if has {
+			b.WriteString("=")
+			if strings.HasPrefix(val, "${") || val == "" {
+				b.WriteString(val)
+			} else {
+				b.WriteString("***")
+			}
+		}
+	}
+	return b.String()
 }
 
 // Handshake runs initialize + notifications/initialized, which every server
@@ -312,9 +395,12 @@ func (c *stdioConn) readLoop(out io.Reader) {
 			case <-c.waitExit():
 			case <-time.After(2 * time.Second):
 			}
+			// The server's last words are its own text: a terminal
+			// escape in them is spelled out before it becomes an error
+			// anyone prints.
 			reason := fmt.Errorf("server exited")
 			if tail := strings.TrimSpace(c.stderr.String()); tail != "" {
-				reason = fmt.Errorf("server exited: %s", lastLine(tail))
+				reason = fmt.Errorf("server exited: %s", trust.Safe(lastLine(tail)))
 			}
 			c.pending.fail(reason)
 			return
@@ -400,13 +486,15 @@ func lastLine(s string) string {
 type httpConn struct {
 	url     string
 	headers map[string]string
+	client  *http.Client
+	written string // the URL as the catalog wrote it, for error text (redactErr)
 	mu      sync.Mutex
 	session string
 	nextID  int
 }
 
-func newHTTPConn(v spec.View) *httpConn {
-	return &httpConn{url: v.URL, headers: v.Headers}
+func newHTTPConn(v spec.View, client *http.Client, written string) *httpConn {
+	return &httpConn{url: v.URL, headers: v.Headers, client: client, written: written}
 }
 
 // Close ends the session politely; servers that keep per-session state would
@@ -425,7 +513,7 @@ func (c *httpConn) Close() error {
 		return nil
 	}
 	c.setHeaders(req, session)
-	if resp, err := httpClient.Do(req); err == nil {
+	if resp, err := c.client.Do(req); err == nil {
 		resp.Body.Close()
 	}
 	return nil
@@ -448,7 +536,7 @@ func (c *httpConn) post(ctx context.Context, body any) (*http.Response, error) {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.url, bytes.NewReader(data))
 	if err != nil {
-		return nil, err
+		return nil, redactErr(err, c.written)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
@@ -456,7 +544,11 @@ func (c *httpConn) post(ctx context.Context, body any) (*http.Response, error) {
 	session := c.session
 	c.mu.Unlock()
 	c.setHeaders(req, session)
-	return httpClient.Do(req)
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, redactErr(err, c.written)
+	}
+	return resp, nil
 }
 
 func (c *httpConn) Notify(ctx context.Context, method string, params any) error {
@@ -487,8 +579,11 @@ func (c *httpConn) Call(ctx context.Context, method string, params any, out any)
 		c.mu.Unlock()
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// The body is the server's text and ends up on a terminal: an
+		// escape in it (OSC 52 writes the clipboard, ESC[2J clears the
+		// screen) is spelled out here, once, before anyone prints it.
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		msg := strings.TrimSpace(string(snippet))
+		msg := trust.Safe(strings.TrimSpace(string(snippet)))
 		if msg == "" {
 			msg = http.StatusText(resp.StatusCode)
 		}
@@ -575,17 +670,22 @@ func readSSE(r io.Reader, fn func(event, data string) bool) error {
 type sseConn struct {
 	endpoint string
 	headers  map[string]string
+	client   *http.Client
+	written  string // the URL as the catalog wrote it, for error text (redactErr)
 	cancel   context.CancelFunc
 	pending  *pending
 	body     io.Closer
 }
 
-func newSSEConn(ctx context.Context, v spec.View) (*sseConn, error) {
+// newSSEConn opens the stream with stream and posts with client: the same
+// pair as streamable HTTP, or the checking pair for PublicOnly. written is
+// the URL as the catalog wrote it, for error text.
+func newSSEConn(ctx context.Context, v spec.View, client, stream *http.Client, written string) (*sseConn, error) {
 	streamCtx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, v.URL, nil)
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, redactErr(err, written)
 	}
 	req.Header.Set("Accept", "text/event-stream")
 	for k, val := range v.Headers {
@@ -593,10 +693,10 @@ func newSSEConn(ctx context.Context, v spec.View) (*sseConn, error) {
 	}
 	// The stream lives as long as the connection, so it cannot share the
 	// client-wide timeout.
-	resp, err := (&http.Client{}).Do(req) //nolint:bodyclose // the stream is the connection; Close closes it
+	resp, err := stream.Do(req) //nolint:bodyclose // the stream is the connection; Close closes it
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, redactErr(err, written)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		resp.Body.Close()
@@ -604,7 +704,7 @@ func newSSEConn(ctx context.Context, v spec.View) (*sseConn, error) {
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
 
-	c := &sseConn{headers: v.Headers, cancel: cancel, pending: newPending(), body: resp.Body}
+	c := &sseConn{headers: v.Headers, client: client, written: written, cancel: cancel, pending: newPending(), body: resp.Body}
 	endpoint := make(chan string, 1)
 	go func() {
 		err := readSSE(resp.Body, func(event, data string) bool {
@@ -635,7 +735,7 @@ func newSSEConn(ctx context.Context, v spec.View) (*sseConn, error) {
 		base, err := url.Parse(v.URL)
 		if err != nil {
 			c.Close()
-			return nil, err
+			return nil, redactErr(err, written)
 		}
 		ref, err := url.Parse(ep)
 		if err != nil {
@@ -661,15 +761,18 @@ func (c *sseConn) post(ctx context.Context, body any) error {
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(data))
 	if err != nil {
-		return err
+		return redactErr(err, c.written)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := httpClient.Do(req)
+	resp, err := c.client.Do(req)
 	if err != nil {
-		return err
+		// The endpoint came from the server, not the catalog: written
+		// names the stream's URL, which is close enough to say which
+		// server failed and carries nothing the endpoint added.
+		return redactErr(err, c.written)
 	}
 	defer resp.Body.Close()
 	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))

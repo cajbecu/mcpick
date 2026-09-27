@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -113,9 +114,17 @@ func TestHumanTokens(t *testing.T) {
 	for _, tc := range []struct {
 		in   int
 		want string
-	}{{0, ""}, {320, "320t"}, {4200, "4.2k"}, {250_000, "250k"}} {
+	}{{0, ""}, {19, "<0.1k"}, {99, "<0.1k"}, {100, "0.1k"}, {320, "0.3k"}, {4200, "4.2k"}, {250_000, "250k"}} {
 		if got := HumanTokens(tc.in); got != tc.want {
 			t.Errorf("HumanTokens(%d) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+	for _, tc := range []struct {
+		in   int
+		want string
+	}{{0, "0 tools"}, {1, "1 tool"}, {2, "2 tools"}} {
+		if got := Tools(tc.in); got != tc.want {
+			t.Errorf("Tools(%d) = %q, want %q", tc.in, got, tc.want)
 		}
 	}
 }
@@ -148,6 +157,43 @@ func TestMeasureCacheInvalidatesOnSpecChange(t *testing.T) {
 	}
 }
 
+// measurements.json outlives the run: an error message that carries the
+// expanded URL or a token is written masked, with its kind beside it, so
+// nothing a later `list` prints or a backup keeps holds a credential.
+func TestMeasureCachePersistsErrorsMasked(t *testing.T) {
+	t.Setenv("MCPICK_HOME", t.TempDir())
+	c := LoadCache()
+	sp := map[string]any{"type": "http", "url": "https://h/mcp?api_key=${K}"}
+	c.Put("svc", sp, Result{Name: "svc",
+		Err: `Post "https://h/mcp?api_key=live-key-value": dial tcp: connection refused (token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789)`})
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(c.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{"live-key-value", "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"} {
+		if strings.Contains(string(data), secret) {
+			t.Errorf("measurements.json holds %q:\n%s", secret, data)
+		}
+	}
+	m, ok := LoadCache().Get("svc", sp)
+	if !ok {
+		t.Fatal("the entry should load back")
+	}
+	if m.Kind != "refused" || m.ErrorKind() != "refused" {
+		t.Errorf("kind = %q", m.Kind)
+	}
+	if !strings.Contains(m.Err, "api_key=***") || !strings.Contains(m.Err, "connection refused") {
+		t.Errorf("the masked message should still say what failed: %q", m.Err)
+	}
+	// A file written before the kind was recorded still classifies.
+	if (Measurement{Err: "HTTP 401: nope"}).ErrorKind() != "401" {
+		t.Error("ErrorKind should fall back to the message")
+	}
+}
+
 func TestNeedsLoginRecognisesAuthFailures(t *testing.T) {
 	for _, s := range []string{"HTTP 401: Unauthorized", "invalid_token", "HTTP 401: "} {
 		if !NeedsLogin(s) {
@@ -165,14 +211,15 @@ func TestErrorKind(t *testing.T) {
 	for msg, want := range map[string]string{
 		"HTTP 401: Unauthorized": "401",
 		"HTTP 403: Forbidden":    "403",
-		`Post "http://127.0.0.1:1/mcp": dial tcp 127.0.0.1:1: connect: connection refused`: "refused",
-		"dial tcp: lookup nope.invalid: no such host":                                      "dns",
-		"context deadline exceeded":                                                        "timeout",
-		"tls: failed to verify certificate: x509: certificate signed by unknown authority": "tls",
-		`exec: "uvx": executable file not found in $PATH`:                                  "no cmd",
-		"server exited: fatal: bad config":                                                 "exited",
-		"AHREFS_TOKEN is required: export it first":                                        "env var",
-		"something nobody anticipated":                                                     "error",
+		`Post "http://127.0.0.1:1/mcp": dial tcp 127.0.0.1:1: connect: connection refused`:                         "refused",
+		"dial tcp: lookup nope.invalid: no such host":                                                              "dns",
+		"context deadline exceeded":                                                                                "timeout",
+		"tls: failed to verify certificate: x509: certificate signed by unknown authority":                         "tls",
+		`exec: "uvx": executable file not found in $PATH`:                                                          "no cmd",
+		"server exited: fatal: bad config":                                                                         "exited",
+		"GITHUB_TOKEN is required: export it first":                                                                "env var",
+		`Post "http://pub.example.test/mcp": dial tcp 127.0.0.1:80: 127.0.0.1 is a private address; not contacted`: "private",
+		"something nobody anticipated":                                                                             "error",
 	} {
 		got := ErrorKind(msg)
 		if got != want {

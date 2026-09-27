@@ -20,6 +20,7 @@ import (
 	"github.com/cajbecu/mcpick/internal/fsutil"
 	"github.com/cajbecu/mcpick/internal/mcp"
 	"github.com/cajbecu/mcpick/internal/spec"
+	"github.com/cajbecu/mcpick/internal/trust"
 )
 
 // Separator joins server and tool names. It matches the convention Grok and
@@ -47,6 +48,15 @@ type Proxy struct {
 	dialing map[string]*sync.Mutex
 	dead    map[string]deadline
 	routes  map[string]route // exposed tool name -> upstream
+	warned  map[string]bool  // exposed names whose collision was reported
+	// scrubbers put back each server's expanded values in error text.
+	scrubbers map[string]*spec.Scrubber
+}
+
+// warnf reports a condition the client will not see in the tool list; tests
+// replace it.
+var warnf = func(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "mcpick: "+format+"\n", args...)
 }
 
 type deadline struct {
@@ -63,6 +73,7 @@ func New(sel spec.Selection, timeout time.Duration) *Proxy {
 		dialing: map[string]*sync.Mutex{},
 		dead:    map[string]deadline{},
 		routes:  map[string]route{},
+		warned:  map[string]bool{},
 	}
 }
 
@@ -112,7 +123,9 @@ func (p *Proxy) connect(ctx context.Context, name string) (mcp.Conn, error) {
 
 	dialCtx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
-	conn, err := mcp.Dial(dialCtx, spec.ViewOf(sp))
+	// Written: an error names the URL as the catalog wrote it, as the
+	// picker's and measure's do.
+	conn, err := mcp.DialWith(dialCtx, spec.ViewOf(sp), mcp.Options{Written: spec.ViewOf(p.sel.Raw[name]).URL})
 	if err == nil {
 		if _, err = mcp.Handshake(dialCtx, conn); err != nil {
 			conn.Close()
@@ -121,6 +134,7 @@ func (p *Proxy) connect(ctx context.Context, name string) (mcp.Conn, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err != nil {
+		err = p.scrub(name, err)
 		p.dead[name] = deadline{why: err.Error(), until: time.Now().Add(retryDead)}
 		return nil, err
 	}
@@ -190,11 +204,22 @@ func (p *Proxy) ListTools(ctx context.Context) []mcp.Tool {
 	}
 	wg.Wait()
 
+	// Two upstreams can produce the same exposed name — the sanitiser maps
+	// `a.b` and `a_b` alike, a server named `a__b` with tool `c` meets
+	// server `a` with tool `b__c` — and a list with a name twice is
+	// rejected whole by clients. The first in selection order keeps the
+	// name; the other tool is left out and said once on stderr.
 	routes := map[string]route{}
 	var out []mcp.Tool
+	var collisions []string
 	for i, tools := range results {
 		for _, t := range tools {
 			exposed := exposedName(p.sel.Names[i], t.Name)
+			if first, taken := routes[exposed]; taken {
+				collisions = append(collisions, fmt.Sprintf("%s: %s/%s hidden by %s/%s",
+					exposed, p.sel.Names[i], t.Name, first.server, first.tool))
+				continue
+			}
 			routes[exposed] = route{server: p.sel.Names[i], tool: t.Name}
 			t.Name = exposed
 			out = append(out, t)
@@ -202,7 +227,17 @@ func (p *Proxy) ListTools(ctx context.Context) []mcp.Tool {
 	}
 	p.mu.Lock()
 	p.routes = routes
+	var fresh []string
+	for _, c := range collisions {
+		if !p.warned[c] {
+			p.warned[c] = true
+			fresh = append(fresh, c)
+		}
+	}
 	p.mu.Unlock()
+	for _, c := range fresh {
+		warnf("serve: tool name collision, %s", c)
+	}
 	return out
 }
 
@@ -236,9 +271,35 @@ func (p *Proxy) CallTool(ctx context.Context, exposed string, args json.RawMessa
 		if isTransportError(err) {
 			p.drop(r.server, conn)
 		}
-		return nil, err
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return nil, p.scrub(r.server, err)
 	}
 	return raw, nil
+}
+
+// scrub is err with the values expansion put into the server's spec, and
+// headers attached since, replaced in its text (spec.Scrubber): the error
+// goes to the client, and an upstream or a resolver may echo them. The
+// caller holds p.mu. With no spec as written for the server — a selection
+// built from expanded specs — the error is as it came.
+func (p *Proxy) scrub(name string, err error) error {
+	raw, ok := p.sel.Raw[name]
+	if !ok {
+		return err
+	}
+	if p.scrubbers == nil {
+		p.scrubbers = map[string]*spec.Scrubber{}
+	}
+	s, ok := p.scrubbers[name]
+	if !ok {
+		s = spec.NewScrubber(raw, p.sel.Specs[name])
+		p.scrubbers[name] = s
+	}
+	if text := s.Scrub(err.Error()); text != err.Error() {
+		return errors.New(text)
+	}
+	return err
 }
 
 // negotiate answers a client's protocol version with the same one when mcpick
@@ -331,7 +392,7 @@ func (p *Proxy) Handle(ctx context.Context, raw json.RawMessage) *mcp.RPCRespons
 func (p *Proxy) ServeStdio(ctx context.Context, in io.Reader, out io.Writer) error {
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 0, 64<<10), 16<<20)
-	enc := json.NewEncoder(out)
+	enc := safeEncoder{out}
 	for sc.Scan() {
 		if ctx.Err() != nil {
 			return nil
@@ -417,7 +478,7 @@ func (p *Proxy) Handler() http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
+		_ = safeEncoder{w}.Encode(resp)
 	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "ok")
@@ -442,4 +503,18 @@ func (p *Proxy) ServeHTTP(ctx context.Context, addr string) error {
 		return err
 	}
 	return nil
+}
+
+// safeEncoder writes one JSON value and a newline, with the characters a
+// terminal would act on escaped (trust.SafeJSON): serve's output is often
+// read on one while a client is set up.
+type safeEncoder struct{ w io.Writer }
+
+func (e safeEncoder) Encode(v any) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	_, err = e.w.Write(append(trust.SafeJSON(data), '\n'))
+	return err
 }

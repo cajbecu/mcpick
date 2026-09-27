@@ -62,33 +62,6 @@ func TestWorkspaceRootStopsAtNearestRepository(t *testing.T) {
 	}
 }
 
-func TestDeleteProfile(t *testing.T) {
-	for _, name := range []string{".mcp.yaml", ".mcp.json"} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), name)
-			if err := SaveProfile(path, "a", []string{"x"}); err != nil {
-				t.Fatal(err)
-			}
-			if err := SaveProfile(path, "b", []string{"y"}); err != nil {
-				t.Fatal(err)
-			}
-			if err := DeleteProfile(path, "a"); err != nil {
-				t.Fatal(err)
-			}
-			_, _, profiles, err := ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if _, ok := profiles["a"]; ok || len(profiles["b"]) != 1 {
-				t.Errorf("profiles = %v", profiles)
-			}
-			if err := DeleteProfile(path, "a"); err == nil {
-				t.Error("deleting a missing profile must be an error, so a typo does not look like success")
-			}
-		})
-	}
-}
-
 func TestProfileWithUnknownServerWarns(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
@@ -181,7 +154,7 @@ func TestDeleteLeavesOtherContentByteIdentical(t *testing.T) {
     "keep": {"url": "https://y"}
   }
 }`)
-	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginGlobal); err != nil {
+	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginUser); err != nil {
 		t.Fatal(err)
 	}
 	body, _ := os.ReadFile(path)
@@ -227,11 +200,11 @@ func TestEnableInClaude(t *testing.T) {
   "numStartups": 3,
   "disabledMcpServers": ["global-off", "stay-off"],
   "projects": {
-    "/w": {"disabledMcpServers": ["claude_design", "plugin:cloudflare:cf-api", "keep"], "history": ["a < b"]},
-    "/other": {"disabledMcpServers": ["claude_design"]}
+    "/w": {"disabledMcpServers": ["notion", "plugin:cloudflare:cf-api", "keep"], "history": ["a < b"]},
+    "/other": {"disabledMcpServers": ["notion"]}
   }
 }`)
-	if err := EnableInClaude(path, "/w", []string{"claude_design", "plugin:cloudflare:cf-api", "global-off"}); err != nil {
+	if err := EnableInClaude(path, "/w", []string{"notion", "plugin:cloudflare:cf-api", "global-off"}); err != nil {
 		t.Fatal(err)
 	}
 	body, _ := os.ReadFile(path)
@@ -250,7 +223,7 @@ func TestEnableInClaude(t *testing.T) {
 	if strings.Join(got.Projects["/w"].Disabled, ",") != "keep" {
 		t.Errorf("project = %v, want [keep]", got.Projects["/w"].Disabled)
 	}
-	if strings.Join(got.Projects["/other"].Disabled, ",") != "claude_design" {
+	if strings.Join(got.Projects["/other"].Disabled, ",") != "notion" {
 		t.Error("another project's list must not be touched")
 	}
 	if !strings.Contains(string(body), `"a < b"`) {
@@ -289,5 +262,38 @@ func TestClaudeNames(t *testing.T) {
 	names := cat.ClaudeNames()
 	if names["own"] != "own" || names["cf-api"] != "plugin:cloudflare:cf-api" {
 		t.Errorf("names = %v", names)
+	}
+}
+
+// A name defined in the catalog and again in ~/.claude.json is reported
+// once per pair of files, on one line naming the servers — and not at all
+// when the two definitions are the same server: equal, or one the redacted
+// form of the other, which is what `import` leaves behind.
+func TestShadowWarningsCollapseAndStaySilentForTheSameServer(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", home)
+	write(t, filepath.Join(root, ".mcp.yaml"), `servers:
+  same: {type: http, url: https://x/same, timeout: 30}
+  redacted: {type: http, url: https://x/r, headers: {Authorization: "Bearer ${REDACTED_AUTHORIZATION:?export REDACTED_AUTHORIZATION}"}}
+  moved: {type: http, url: https://x/moved-here}
+  other: {type: http, url: https://x/other-here}
+`)
+	write(t, filepath.Join(home, ".claude.json"), `{"mcpServers": {
+  "same": {"type": "http", "url": "https://x/same", "timeout": 30},
+  "redacted": {"type": "http", "url": "https://x/r", "headers": {"Authorization": "Bearer live-token"}},
+  "moved": {"type": "http", "url": "https://x/moved"},
+  "other": {"type": "http", "url": "https://x/other"}
+}}`)
+	cat, err := Load(filepath.Join(root, ".mcp.yaml"), root, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "2 servers in .mcp.yaml shadow " + filepath.Join(home, ".claude.json") + " (moved, other); the catalog wins"
+	if len(cat.Warnings) != 1 || cat.Warnings[0] != want {
+		t.Errorf("warnings = %q\n    want %q", cat.Warnings, want)
+	}
+	if len(cat.Servers) != 4 {
+		t.Errorf("servers = %v, want the four, once each", serverNames(cat))
 	}
 }

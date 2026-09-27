@@ -4,32 +4,55 @@ on:
   push:
     tags: ["v*"]
 
-permissions:
-  contents: write      # create the release and upload assets
-  id-token: write      # sign the provenance attestation
-  attestations: write  # store it
+# Nothing at the workflow level: the test job reads, only the publish job
+# writes, and it starts only once the tests have passed on the tagged commit.
+permissions: {}
 
 jobs:
-  goreleaser:
+  # A tag is published the moment it is pushed; the tests have to pass
+  # here, not only in the ci workflow running alongside.
+  test:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
+          persist-credentials: false
       # Release binaries carry the standard library they were built with;
       # go-version-file would pin the unpatched release named in go.mod.
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: stable
           check-latest: true
-      # A tag is published the moment it is pushed; the tests have to pass
-      # here, not only in the ci workflow running alongside.
+      - name: the tag names the version in VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          test "$TAG" = "v$(cat VERSION)" || { echo "tag $TAG but VERSION is $(cat VERSION)"; exit 1; }
       - run: go test -race ./...
-      - run: go install golang.org/x/vuln/cmd/govulncheck@latest
+      - run: go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
       - run: govulncheck ./...
-      - uses: goreleaser/goreleaser-action@v6
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # create the release and upload assets
+      id-token: write      # sign the provenance attestation
+      attestations: write  # store it
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          version: latest
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          version: v2.18.2
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,7 +65,7 @@ jobs:
       # Enterprise plans); on a private one the step fails after the release is
       # already published. It switches itself on when the repository goes public.
       - if: ${{ !github.event.repository.private }}
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/*.tar.gz

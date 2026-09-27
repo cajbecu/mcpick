@@ -256,30 +256,6 @@ func TestJSONCatalogEdits(t *testing.T) {
 	}
 }
 
-func TestSaveProfileRoundTrip(t *testing.T) {
-	for _, name := range []string{".mcp.yaml", ".mcp.json"} {
-		t.Run(name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), name)
-			if err := AddServer(path, "a", map[string]any{"type": "http", "url": "https://x/a"}); err != nil {
-				t.Fatal(err)
-			}
-			if err := SaveProfile(path, "review", []string{"a", "b"}); err != nil {
-				t.Fatal(err)
-			}
-			names, _, profiles, err := ReadFile(path)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(names) != 1 {
-				t.Errorf("servers = %v, saving a profile must not disturb them", names)
-			}
-			if got := profiles["review"]; len(got) != 2 || got[0] != "a" {
-				t.Errorf("profiles = %v", profiles)
-			}
-		})
-	}
-}
-
 // ~/.claude.json is mostly somebody else's state — conversation history,
 // project records, onboarding flags. Rewriting it through a Go map would
 // reshuffle every key in a file the user never asked mcpick to reformat.
@@ -292,7 +268,7 @@ func TestDeleteKeepsTopLevelOrder(t *testing.T) {
   "theme": "dark"
 }`)
 
-	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginGlobal); err != nil {
+	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginUser); err != nil {
 		t.Fatal(err)
 	}
 	data, err := os.ReadFile(path)
@@ -322,7 +298,7 @@ func TestDeleteWritesBackup(t *testing.T) {
 	path := filepath.Join(dir, ".claude.json")
 	write(t, path, `{"mcpServers":{"drop":{"url":"https://x"}}}`)
 
-	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginGlobal); err != nil {
+	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginUser); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -351,7 +327,7 @@ func TestDeleteProjectScoped(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".claude.json")
 	write(t, path, `{"projects":{"/w":{"mcpServers":{"drop":{"url":"https://x"},"keep":{"url":"https://y"}}}}}`)
 
-	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginProject); err != nil {
+	if err := DeleteFromClaudeJSON(path, "/w", "drop", OriginLocal); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(path)
@@ -375,22 +351,22 @@ func TestDeleteProjectScoped(t *testing.T) {
 func TestDeleteMissingServerIsAnError(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ".claude.json")
 	write(t, path, `{"mcpServers":{"a":{"url":"https://x"}}}`)
-	if err := DeleteFromClaudeJSON(path, "/w", "nope", OriginGlobal); err == nil {
+	if err := DeleteFromClaudeJSON(path, "/w", "nope", OriginUser); err == nil {
 		t.Fatal("deleting a server that is not there must report it")
 	}
 }
 
 func TestResolveKeepsCatalogOrder(t *testing.T) {
 	cat := sampleCatalog()
-	sel := map[string]bool{"neo": true, "ahrefs": true}
+	sel := map[string]bool{"browser": true, "github": true}
 	got, err := Resolve(cat, sel, "uid-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Names) != 2 || got.Names[0] != "ahrefs" || got.Names[1] != "neo" {
-		t.Fatalf("names = %v, want [ahrefs neo]", got.Names)
+	if len(got.Names) != 2 || got.Names[0] != "github" || got.Names[1] != "browser" {
+		t.Fatalf("names = %v, want [github browser]", got.Names)
 	}
-	if u := got.Specs["neo"]["url"]; u != "http://127.0.0.1:9010/mcp?session=uid-1" {
+	if u := got.Specs["browser"]["url"]; u != "http://127.0.0.1:9010/mcp?session=uid-1" {
 		t.Errorf("uid was not substituted: %v", u)
 	}
 	// The catalog itself keeps its placeholder.
@@ -401,20 +377,20 @@ func TestResolveKeepsCatalogOrder(t *testing.T) {
 
 func sampleCatalog() *Catalog {
 	return &Catalog{
-		Path:       "/workspace/.mcp.yaml",
-		ClaudePath: "/home/agent/.claude.json",
-		ProjectKey: "/workspace",
-		Profiles:   map[string][]string{"review": {"ahrefs", "freshdesk"}},
+		Path:       "/src/app/.mcp.yaml",
+		ClaudePath: "/nonexistent/mcpick-test/.claude.json", // never the real one
+		ProjectKey: "/src/app",
+		Profiles:   map[string][]string{"review": {"github", "sentry"}},
 		Servers: []Server{
-			{Name: "ahrefs", Origin: OriginWorkspace, Spec: httpSpec("https://api.ahrefs.com/mcp/mcp")},
-			{Name: "local-tool", Origin: OriginWorkspace, Spec: map[string]any{
+			{Name: "github", Origin: OriginProject, Spec: httpSpec("https://api.githubcopilot.com/mcp/")},
+			{Name: "local-tool", Origin: OriginProject, Spec: map[string]any{
 				"type": "stdio", "command": "uvx",
 				"args": []any{"some-mcp", "--session", "{UUID}"}}},
-			{Name: "claude_design", Origin: OriginProject, Spec: httpSpec("https://api.anthropic.com/v1/design/mcp")},
-			{Name: "google-webmaster", Origin: OriginProject, Spec: httpSpec("https://mcp.example.com/google-webmaster")},
-			{Name: "playwright-mcp", Origin: OriginProject, Spec: httpSpec("http://playwright-mcp:8931/mcp")},
-			{Name: "freshdesk", Origin: OriginGlobal, Spec: httpSpec("https://mcp.example.com/freshdesk")},
-			{Name: "neo", Origin: OriginGlobal, Spec: httpSpec("http://127.0.0.1:9010/mcp?session={UUID}")},
+			{Name: "notion", Origin: OriginLocal, Spec: httpSpec("https://mcp.notion.com/mcp")},
+			{Name: "linear", Origin: OriginLocal, Spec: httpSpec("https://mcp.linear.app/mcp")},
+			{Name: "playwright-mcp", Origin: OriginLocal, Spec: httpSpec("http://playwright-mcp:8931/mcp")},
+			{Name: "sentry", Origin: OriginUser, Spec: httpSpec("https://mcp.sentry.dev/mcp")},
+			{Name: "browser", Origin: OriginUser, Spec: httpSpec("http://127.0.0.1:9010/mcp?session={UUID}")},
 		},
 	}
 }

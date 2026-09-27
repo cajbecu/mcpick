@@ -2,7 +2,7 @@
 #
 # The shape is Claude's mcpServers, in YAML so it can carry comments. mcpick
 # converts it to whatever dialect the agent you launch expects — TOML for Codex
-# and Grok, serverUrl for Antigravity, a command array for opencode, and so on.
+# and Grok, a command array for opencode, and so on.
 #
 # Placeholders are expanded only in the config handed to the agent; this file
 # keeps them.
@@ -18,11 +18,11 @@
 servers:
   # A remote server whose token must be present. ${VAR:?} turns a forgotten
   # export into a clear error instead of a confusing 401 twenty seconds later.
-  ahrefs:
+  github:
     type: http
-    url: https://api.ahrefs.com/mcp/mcp
+    url: https://api.githubcopilot.com/mcp/
     headers:
-      Authorization: "Bearer ${AHREFS_TOKEN:?export AHREFS_TOKEN first}"
+      Authorization: "Bearer ${GITHUB_TOKEN:?export GITHUB_TOKEN first}"
 
   # A local process. Everything after command goes in args.
   filesystem:
@@ -30,8 +30,11 @@ servers:
     command: npx
     args: ["-y", "@modelcontextprotocol/server-filesystem", "${HOME}/src"]
 
-  # Per-session routing: each box gets its own upstream session.
-  neo:
+  # Per-session routing: each box gets its own upstream session. A remote
+  # server of the repository with a placeholder ({UUID}, ${VAR}) or a private
+  # host says "ask" in the picker: it is measured only once ticked, or once
+  # T trusts the repository's catalog.
+  browser:
     type: http
     url: http://127.0.0.1:9010/mcp?session={UUID}
 
@@ -40,12 +43,13 @@ servers:
     type: http
     url: "${PLAYWRIGHT_MCP_URL:-http://playwright-mcp:8931/mcp}"
 
-# Named selections. They live here so they travel with the repository:
+# Shared profiles: named selections that travel with the repository. mcpick
+# lists and loads them, `c` in the picker copies one into yours, `d` deletes
+# it from this file; your own live in ~/.mcpick/profiles.yaml (`p` in the
+# picker, or `mcpick profile`).
 #
 #   mcpick --profile review run claude
-#
-# `s` in the picker saves the current selection as a profile.
 profiles:
-  review: [ahrefs, filesystem]
-  browser: [playwright, neo]
+  review: [github, filesystem]
+  web: [playwright, browser]
   minimal: [filesystem]

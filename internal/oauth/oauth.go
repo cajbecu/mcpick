@@ -9,15 +9,18 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cajbecu/mcpick/internal/fsutil"
@@ -55,6 +58,10 @@ func (t Token) expiringWithin(d time.Duration) bool {
 	return !t.ExpiresAt.IsZero() && time.Now().Add(d).After(t.ExpiresAt)
 }
 
+// Store is the tokens file, <home>/state/tokens.json. It is shared by
+// every mcpick process and every measurement running in one, so it is
+// never written from a copy: every change goes through Update, which
+// works on the file as it is then.
 type Store struct {
 	path   string
 	Tokens map[string]Token `json:"tokens"`
@@ -66,8 +73,14 @@ func Key(name, rawURL string) string {
 	return name + "@" + fsutil.ShortHash(rawURL)
 }
 
-func LoadStore() *Store {
-	s := &Store{path: filepath.Join(fsutil.StateDir(), "tokens.json"), Tokens: map[string]Token{}}
+func tokensPath() string { return filepath.Join(fsutil.StateDir(), "tokens.json") }
+
+// LoadStore reads the tokens as they are now. A missing or unreadable file
+// is an empty store.
+func LoadStore() *Store { return openStore(tokensPath()) }
+
+func openStore(path string) *Store {
+	s := &Store{path: path, Tokens: map[string]Token{}}
 	data, err := os.ReadFile(s.path)
 	if err != nil {
 		return s
@@ -79,23 +92,86 @@ func LoadStore() *Store {
 	return s
 }
 
-func (s *Store) Save() error {
-	data, err := json.MarshalIndent(s, "", "  ")
+// lockWait is how long Update waits for the lock another process holds;
+// lockStale is when a leftover lock is ignored.
+var (
+	lockWait  = 2 * time.Second
+	lockStale = 30 * time.Second
+)
+
+// Update applies one change to the tokens as they are on disk now, not to
+// the copy s was loaded from: under the file's lock the store is reloaded,
+// fn changes it, and it is written atomically, mode 0600; s then holds the
+// result. Two measurements refreshing two tokens at once thus each merge
+// their own into the file, instead of the second saving its stale copy of
+// the first's over it. An error from fn leaves the file as it was.
+func (s *Store) Update(fn func(*Store) error) error {
+	if err := os.MkdirAll(filepath.Dir(s.path), 0o700); err != nil {
+		return err
+	}
+	unlock, err := fsutil.Lock(s.path, lockWait, lockStale)
 	if err != nil {
 		return err
 	}
-	return fsutil.WriteFileAtomic(s.path, append(data, '\n'), 0o600)
+	defer unlock()
+	fresh := openStore(s.path)
+	if err := fn(fresh); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(fresh, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := fsutil.WriteFileAtomic(s.path, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	s.Tokens = fresh.Tokens
+	return nil
 }
+
+// Put stores tok under key: what `mcpick login` ends with.
+func Put(key string, tok Token) error {
+	return LoadStore().Update(func(s *Store) error {
+		s.Tokens[key] = tok
+		return nil
+	})
+}
+
+// Forget drops every token of the server named name and says how many
+// there were: `mcpick logout`. With none, nothing is written.
+func Forget(name string) (int, error) {
+	n := 0
+	err := LoadStore().Update(func(s *Store) error {
+		for key := range s.Tokens {
+			if strings.HasPrefix(key, name+"@") {
+				delete(s.Tokens, key)
+				n++
+			}
+		}
+		if n == 0 {
+			return errNothingToForget
+		}
+		return nil
+	})
+	if err == errNothingToForget {
+		return 0, nil
+	}
+	return n, err
+}
+
+var errNothingToForget = errors.New("no token stored")
 
 // Attach adds a stored Authorization header to every selected server that
 // has one and is not already carrying its own. A catalog header always wins:
-// the user wrote it on purpose.
-func Attach(sel spec.Selection) []string {
+// the user wrote it on purpose. A token about to expire is refreshed first
+// (see refresh). It returns the servers whose token was refreshed, and the
+// first error saving one: the header is attached either way, since the
+// token is good for this run, and the caller says what happened.
+func Attach(sel spec.Selection) (refreshed []string, err error) {
 	store := LoadStore()
 	if len(store.Tokens) == 0 {
-		return nil
+		return nil, nil
 	}
-	var refreshed []string
 	for _, n := range sel.Names {
 		v := spec.ViewOf(sel.Specs[n])
 		if !v.Remote() || hasAuthHeader(v.Headers) {
@@ -107,11 +183,13 @@ func Attach(sel spec.Selection) []string {
 			continue
 		}
 		if tok.expiringWithin(time.Minute) && tok.RefreshToken != "" {
-			newTok, err := refreshToken(context.Background(), tok)
-			if err == nil {
-				store.Tokens[key] = newTok
+			newTok, done, saveErr := refresh(key, tok)
+			if done {
 				tok = newTok
 				refreshed = append(refreshed, n)
+			}
+			if saveErr != nil && err == nil {
+				err = fmt.Errorf("could not save the refreshed OAuth token for %s: %w", n, saveErr)
 			}
 		}
 		headers, _ := sel.Specs[n]["headers"].(map[string]any)
@@ -121,10 +199,75 @@ func Attach(sel spec.Selection) []string {
 		}
 		headers["Authorization"] = tok.header()
 	}
-	if len(refreshed) > 0 {
-		_ = store.Save()
+	return refreshed, err
+}
+
+// refreshing serialises the refreshes of one token within this process
+// (key -> *sync.Mutex): the picker measures every server at once, and a
+// server that rotates refresh tokens honours the first use only.
+var refreshing sync.Map
+
+// refresh renews the token stored under key and merges it into the file
+// (refreshAt), one refresh of a token at a time within this process.
+func refresh(key string, old Token) (tok Token, refreshed bool, saveErr error) {
+	m, _ := refreshing.LoadOrStore(key, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+	return refreshAt(LoadStore(), key, old)
+}
+
+// refreshWait is how long a refresh waits for another process refreshing
+// the same token — its token request included (httpClient's timeout) —
+// and refreshStale when its lock is taken for abandoned.
+var (
+	refreshWait  = 35 * time.Second
+	refreshStale = 60 * time.Second
+)
+
+// refreshAt renews the token stored under key in the tokens file of s.
+// The token's own lock file, next to the tokens file, is held from the
+// re-read to the save, so no two processes ever spend the same refresh
+// token: under it the file is read again first, and a token another
+// process has refreshed in the meantime is used as it is. The new token
+// goes into the file through Update, over whatever the other tokens are
+// by then. It returns the token to attach, whether it was refreshed (a
+// refresh that fails, or waits in vain for the lock, leaves old to attach
+// and the server to say 401), and the error saving it, if any.
+func refreshAt(s *Store, key string, old Token) (tok Token, refreshed bool, saveErr error) {
+	fresh := func() (Token, bool) {
+		cur, ok := openStore(s.path).Tokens[key]
+		return cur, ok && cur.AccessToken != old.AccessToken && !cur.expiringWithin(time.Minute)
 	}
-	return refreshed
+	unlock, err := fsutil.Lock(s.path+".refresh-"+fsutil.ShortHash(key), refreshWait, refreshStale)
+	var pathErr *fs.PathError
+	switch {
+	case err == nil:
+		defer unlock()
+	case errors.As(err, &pathErr):
+		// No lock file can be made there (a read-only or missing state
+		// directory): no other process can have made one either. The
+		// refresh goes ahead, and a save that fails is reported.
+	default:
+		// Still being refreshed elsewhere: whatever the file has by now,
+		// never the same refresh token spent beside it.
+		if cur, ok := fresh(); ok {
+			return cur, true, nil
+		}
+		return old, false, nil
+	}
+	if cur, ok := fresh(); ok {
+		return cur, true, nil
+	}
+	tok, err = refreshToken(context.Background(), old)
+	if err != nil {
+		return old, false, nil
+	}
+	saveErr = s.Update(func(s *Store) error {
+		s.Tokens[key] = tok
+		return nil
+	})
+	return tok, true, saveErr
 }
 
 func hasAuthHeader(h map[string]string) bool {

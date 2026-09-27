@@ -30,6 +30,9 @@ type Result struct {
 	// Auth says where the credentials came from when mcpick supplied them,
 	// e.g. "Claude Code token"; empty when none were needed or found.
 	Auth string `json:"auth,omitempty"`
+	// Skipped marks a server that was not contacted at all: its command is
+	// not trusted, or it is the repository's and not selected. Err says which.
+	Skipped bool `json:"skipped,omitempty"`
 
 	ToolList []Tool `json:"-"`
 }
@@ -46,21 +49,33 @@ func EstimateTokens(tools []Tool) int {
 	return len(data) / 4
 }
 
+// Probe connects to one server, initializes and lists its tools.
+func Probe(ctx context.Context, name string, sp map[string]any, timeout time.Duration) Result {
+	return ProbeWith(ctx, name, sp, timeout, Options{})
+}
+
+// ProbeWith is Probe with connection Options.
+//
 // The result is a named return so the deferred timing lands in what the
 // caller gets; set on a local copy, it was lost and every latency read 0ms.
-func Probe(ctx context.Context, name string, sp map[string]any, timeout time.Duration) (res Result) {
+func ProbeWith(ctx context.Context, name string, sp map[string]any, timeout time.Duration, opt Options) (res Result) {
 	v := spec.ViewOf(sp)
 	res = Result{Name: name, Remote: v.Remote()}
 	start := time.Now()
+	var scrub *spec.Scrubber
+	if opt.Raw != nil {
+		scrub = spec.NewScrubber(opt.Raw, sp)
+	}
 	defer func() {
 		res.Elapsed = time.Since(start)
 		res.Millis = res.Elapsed.Milliseconds()
+		res.Err = scrub.Scrub(res.Err)
 	}()
 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	conn, err := Dial(ctx, v)
+	conn, err := DialWith(ctx, v, opt)
 	if err != nil {
 		res.Err = err.Error()
 		return res
@@ -89,6 +104,12 @@ func Probe(ctx context.Context, name string, sp map[string]any, timeout time.Dur
 // ProbeAll contacts every server in the selection concurrently. Servers are
 // independent, and a dead one must not hold up the report.
 func ProbeAll(ctx context.Context, sel spec.Selection, timeout time.Duration, parallel int) []Result {
+	return ProbeAllWith(ctx, sel, timeout, parallel, nil)
+}
+
+// ProbeAllWith is ProbeAll with Options per server name; a server not in
+// opts gets the defaults.
+func ProbeAllWith(ctx context.Context, sel spec.Selection, timeout time.Duration, parallel int, opts map[string]Options) []Result {
 	if parallel < 1 {
 		parallel = 8
 	}
@@ -101,7 +122,7 @@ func ProbeAll(ctx context.Context, sel spec.Selection, timeout time.Duration, pa
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			out[i] = Probe(ctx, n, sel.Specs[n], timeout)
+			out[i] = ProbeWith(ctx, n, sel.Specs[n], timeout, opts[n])
 		}(i, n)
 	}
 	wg.Wait()
@@ -110,18 +131,33 @@ func ProbeAll(ctx context.Context, sel spec.Selection, timeout time.Duration, pa
 
 // --- Measurement cache ----------------------------------------------------
 
-// The picker shows a token estimate next to every server. Connecting to all of
-// them on every launch would defeat the point of a fast picker, so results are
-// cached against a hash of the spec: change the spec, lose the cache entry.
+// `measure` and `doctor` keep what they learned in state/measurements.json
+// so that `list` can show a cost next to each server without connecting.
+// The picker never reads it: it starts every run with nothing measured. An
+// entry is keyed on a hash of the spec, so a changed spec loses its entry.
+// The error text is not kept as it came: the file outlives the run and a
+// message can carry a URL with the environment expanded into it, so only
+// its kind (ErrorKind) and the message with credentials masked
+// (spec.MaskText) are written.
 
 type Measurement struct {
 	Tools  int    `json:"tools"`
 	Tokens int    `json:"tokens"`
 	OK     bool   `json:"ok"`
 	Err    string `json:"error,omitempty"`
+	Kind   string `json:"kind,omitempty"`
 	At     string `json:"at"`
 	Spec   string `json:"spec"`
 	Auth   string `json:"auth,omitempty"`
+}
+
+// ErrorKind is the one-word class of the failure: the kind recorded with
+// the entry, or, for a file written before it was, taken from the message.
+func (m Measurement) ErrorKind() string {
+	if m.Kind != "" {
+		return m.Kind
+	}
+	return ErrorKind(m.Err)
 }
 
 type Cache struct {
@@ -182,16 +218,22 @@ func (c *Cache) Get(name string, sp map[string]any) (Measurement, bool) {
 	return m, true
 }
 
+// Put records a result. The error is kept as its kind and a masked message
+// (see Measurement): the file stays on disk, the run's secrets must not.
 func (c *Cache) Put(name string, sp map[string]any, r Result) {
-	c.Entries[name] = Measurement{
+	m := Measurement{
 		Tools:  r.Tools,
 		Tokens: r.Tokens,
 		OK:     r.OK,
-		Err:    r.Err,
 		Auth:   r.Auth,
 		At:     time.Now().UTC().Format(time.RFC3339),
 		Spec:   Fingerprint(sp),
 	}
+	if r.Err != "" {
+		m.Kind = ErrorKind(r.Err)
+		m.Err = spec.MaskText(r.Err)
+	}
+	c.Entries[name] = m
 }
 
 func (c *Cache) Save() error {
@@ -202,17 +244,28 @@ func (c *Cache) Save() error {
 	return fsutil.WriteFileAtomic(c.path, append(data, '\n'), 0o600)
 }
 
+// HumanTokens is a token count in thousands, the unit every context figure
+// is quoted in: 4.2k, 250k, and <0.1k for the few dozen tokens of a server
+// with one small tool. Zero is nothing to show.
 func HumanTokens(n int) string {
 	switch {
 	case n <= 0:
 		return ""
-	case n < 1000:
-		return fmt.Sprintf("%dt", n)
+	case n < 100:
+		return "<0.1k"
 	case n < 100_000:
 		return fmt.Sprintf("%.1fk", float64(n)/1000)
 	default:
 		return fmt.Sprintf("%dk", n/1000)
 	}
+}
+
+// Tools counts tools in words: "1 tool", "12 tools".
+func Tools(n int) string {
+	if n == 1 {
+		return "1 tool"
+	}
+	return fmt.Sprintf("%d tools", n)
 }
 
 func SortByCost(rs []Result) {
@@ -231,6 +284,7 @@ func ErrorKind(msg string) string {
 		return code[1]
 	}
 	for _, k := range []struct{ needle, kind string }{
+		{"private address", "private"}, // PublicOnly refused the address dialled
 		{"connection refused", "refused"},
 		{"no such host", "dns"},
 		{"server misbehaving", "dns"},

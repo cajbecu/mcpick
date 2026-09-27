@@ -1,0 +1,5 @@
+# Backstop: this repository is not a build context. The end-to-end image is
+# built with `docker build -f e2e/Dockerfile .`, and e2e/Dockerfile.dockerignore
+# is the allowlist that applies to it; any other Dockerfile pointed at this
+# directory gets nothing unless it brings its own ignore file.
+*
