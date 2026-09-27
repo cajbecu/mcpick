@@ -6,6 +6,13 @@ and the project uses [semantic versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-27
+
+### Fixed
+
+- The release publishes the Homebrew cask. The 0.2.0 release stopped at
+  that step, so `brew` still installed 0.1.0; the code is the same as 0.2.0.
+
 ## [0.2.0] - 2026-09-27
 
 ### Upgrading from 0.1.0
@@ -196,6 +203,7 @@ First release.
   `.apk` packages with the man page and shell completions; a Homebrew cask in
   `cajbecu/tap`; a Nix flake; checksums and build-provenance attestations.
 
-[Unreleased]: https://github.com/cajbecu/mcpick/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/cajbecu/mcpick/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/cajbecu/mcpick/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/cajbecu/mcpick/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/cajbecu/mcpick/releases/tag/v0.1.0

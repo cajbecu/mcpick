@@ -11,7 +11,7 @@ the session needs it or not. mcpick puts a checkbox list in front of the
 agent and launches it with only what you checked.
 
 ```
- ✻ claude   3/7 selected · ~12.1k context · mcpick 0.2.0
+ ✻ claude   3/7 selected · ~12.1k context · mcpick 0.2.1
 → claude --mcp-config <rendered config> --strict-mcp-config
 
 Project • 1/3 selected  ~/src/app/.mcp.yaml
