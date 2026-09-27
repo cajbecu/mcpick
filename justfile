@@ -55,6 +55,33 @@ e2e *ARGS:
     docker build -f e2e/Dockerfile -t mcpick-e2e .
     docker run --rm mcpick-e2e {{ARGS}}
 
+# Refresh vendorHash in flake.nix after go.mod or go.sum changed (a
+# Dependabot pull request, a `go get`): builds the flake with a placeholder
+# hash, takes the real one from Nix's "got:" line and writes it back. Uses
+# nix when installed, the nixos/nix image otherwise.
+nix-hash:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    placeholder='sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='
+    old=$(sed -n -E 's/.*vendorHash = "([^"]*)".*/\1/p' flake.nix)
+    setHash() { sed -i.bak -E "s|vendorHash = \"[^\"]*\"|vendorHash = \"$1\"|" flake.nix && rm -f flake.nix.bak; }
+    setHash "$placeholder"
+    build='nix --extra-experimental-features "nix-command flakes" build --no-link path:.'
+    if command -v nix >/dev/null; then
+        out=$(eval "$build" 2>&1 || true)
+    else
+        out=$(docker run --rm -v "$PWD":/src -w /src nixos/nix sh -c "$build" 2>&1 || true)
+    fi
+    got=$(printf '%s\n' "$out" | sed -n -E 's/.*got: *(sha256-[A-Za-z0-9+\/=]+).*/\1/p' | head -1)
+    if [ -z "$got" ]; then
+        setHash "$old"
+        printf '%s\n' "$out" | tail -20
+        echo "no hash in the output; flake.nix left as it was" >&2
+        exit 1
+    fi
+    setHash "$got"
+    if [ "$got" = "$old" ]; then echo "vendorHash unchanged: $got"; else echo "vendorHash: $old -> $got"; fi
+
 install: build
     install -d ~/.local/bin
     install -m 0755 dist/mcpick ~/.local/bin/mcpick

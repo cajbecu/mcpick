@@ -109,15 +109,13 @@ install goes in `e2e/Dockerfile`.
 ## Changing dependencies
 
 `flake.nix` pins a hash of the Go module dependencies (`vendorHash`). After any
-change to `go.mod` or `go.sum`, set it to `pkgs.lib.fakeHash`, run `nix build`,
-and paste the hash from the `got:` line. Without Nix installed:
+change to `go.mod` or `go.sum` run `just nix-hash`: it builds the flake with a
+placeholder, takes the real hash from Nix's `got:` line and writes it back
+(with Nix installed, or through the `nixos/nix` Docker image without it).
 
-```sh
-docker run --rm -v "$PWD":/src -w /src nixos/nix \
-  nix --extra-experimental-features "nix-command flakes" build path:/src
-```
-
-CI builds the flake, so a stale hash fails the pull request.
+CI builds the flake, so a stale hash fails the pull request. Dependabot's Go
+pull requests always need it: check the branch out, run `just nix-hash`,
+commit and push to the same branch.
 
 ## Releasing
 
