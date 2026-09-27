@@ -26,7 +26,7 @@
 
           # Hash of the Go module dependencies. When go.mod or go.sum change,
           # set it to pkgs.lib.fakeHash, run `nix build`, and paste the "got:" hash.
-          vendorHash = "sha256-erwlgjLz1LxzOgiEh9GTlpMJGVs6+kXNKQrH9At6Kko=";
+          vendorHash = "sha256-QFFaqdHiKplq4XcjQWgiEuiv3Y2VsGjVdKDfvMlse1k=";
 
           ldflags = [ "-s" "-w" "-X" "main.version=${version}" ];
 
